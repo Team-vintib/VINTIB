@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # EC2 swap 4GB 생성 (S15P11A108-297)
 #
-# 단일 인스턴스에 Spring·FastAPI·PostgreSQL·Redis·(2주차)OpenVidu·GitLab Runner가
-# 동거한다. 물리 메모리는 15Gi로 여유가 있으나, 러너 빌드 잡이 버스트하는 순간이나
-# 예기치 못한 누수 시 OOM Killer가 컨테이너를 죽이는 것을 막는 안전망이다.
+# 단일 인스턴스에 Spring·FastAPI·PostgreSQL 2개·Redis·MinIO·LiveKit·Caddy가 함께 돌고,
+# 배포 때는 같은 서버에서 이미지를 빌드한다(같은 호스트에 다른 팀 GitLab 러너 잡도 돈다).
+# 물리 메모리는 15Gi로 여유가 있으나, 빌드가 몰리는 순간이나 예기치 못한 누수 시
+# OOM Killer가 컨테이너를 죽이는 것을 막는 안전망이다.
 #
 # 멱등: 이미 swap이 있으면 아무 것도 하지 않는다.
 # 사용법: bash infra/ec2/setup-swap.sh
