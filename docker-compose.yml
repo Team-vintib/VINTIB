@@ -232,7 +232,8 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       WORKER_API_KEY: ${WORKER_API_KEY}
-      PUBLIC_BASE_URL: https://i15a108.p.ssafy.io
+      # 서버를 옮길 때 .env 의 PUBLIC_BASE_URL 만 바꾸면 된다. 비우면 옛 운영 도메인.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://i15a108.p.ssafy.io}
       RESULTS_DIR: /app/results
       # 가격 책정(app/pricing/)이 GMS 게이트웨이로 나갈 때 쓴다. 비어 있으면 mock 백엔드로
       # 떨어지므로 컨테이너는 정상 기동한다 — 실시세가 필요할 때만 채운다.

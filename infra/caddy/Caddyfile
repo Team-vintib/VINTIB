@@ -22,7 +22,9 @@
 	auto_https disable_redirects
 }
 
-i15a108.p.ssafy.io {
+# 사이트 주소는 SITE_DOMAIN 환경변수에서 읽는다(docker-compose.prod.yml 이 caddy 에 넘긴다).
+# 서버를 옮길 때 이 파일을 고치지 않아도 되게 하려는 것이다. 비어 있으면 옛 운영 도메인을 쓴다.
+{$SITE_DOMAIN:i15a108.p.ssafy.io} {
 	encode zstd gzip
 
 	# ⚠️ ACME 챌린지를 TLS-ALPN-01(443)로 고정한다.

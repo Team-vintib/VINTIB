@@ -15,7 +15,9 @@ COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml -p vint
 HEALTH_TIMEOUT=180
 # 브라우저가 실제로 여는 주소. presigned·공개 이미지 URL 이 이 값으로 서명된다.
 # infra/caddy/Caddyfile 의 사이트 주소와 반드시 같아야 한다 (서명에 Host 가 포함됨).
-PUBLIC_ORIGIN=https://i15a108.p.ssafy.io
+# 서버를 옮기면 CI/CD Variable PUBLIC_ORIGIN 으로 덮어쓴다(예: https://k15a306.p.ssafy.io).
+PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-https://i15a108.p.ssafy.io}
+SITE_DOMAIN=${PUBLIC_ORIGIN#https://}
 
 log() { echo "[deploy] $*"; }
 
@@ -117,6 +119,8 @@ MINIO_ROOT_PASSWORD=${PROD_MINIO_ROOT_PASSWORD}
 MAIL_USERNAME=${PROD_MAIL_USERNAME}
 MAIL_PASSWORD=${PROD_MAIL_PASSWORD}
 AWS_S3_PUBLIC_ENDPOINT=${PUBLIC_ORIGIN}
+SITE_DOMAIN=${SITE_DOMAIN}
+PUBLIC_BASE_URL=${PUBLIC_ORIGIN}
 OPENVIDU_API_KEY=${PROD_OPENVIDU_API_KEY}
 OPENVIDU_API_SECRET=${PROD_OPENVIDU_API_SECRET}
 OPENVIDU_SERVER_URL=${PROD_OPENVIDU_SERVER_URL}
