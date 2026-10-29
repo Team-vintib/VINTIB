@@ -1,0 +1,7 @@
+#!/bin/sh
+# git pull --rebase(또는 rebase) 직후 실행된다. amend 에서는 아무것도 하지 않는다.
+# rebase 가 끝나면 ORIG_HEAD 가 rebase 직전 HEAD 를 가리킨다.
+[ "$1" = "rebase" ] || exit 0
+. "$(dirname "$0")/_requests.sh"
+show_changed_requests ORIG_HEAD HEAD
+exit 0

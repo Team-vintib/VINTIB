@@ -13,3 +13,5 @@ Caddyfile text eol=lf
 *.yaml text eol=lf
 *.sql text eol=lf
 gradlew text eol=lf
+# Git 훅은 확장자가 없다(post-merge 등). LF가 아니면 Git Bash·리눅스에서 실행이 깨진다.
+.githooks/* text eol=lf

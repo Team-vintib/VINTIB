@@ -1,0 +1,6 @@
+#!/bin/sh
+# git pull(merge) 직후 실행된다. 이번 pull로 바뀐 요청 문서를 보여 준다.
+# ORIG_HEAD = merge 직전 HEAD.
+. "$(dirname "$0")/_requests.sh"
+show_changed_requests ORIG_HEAD HEAD
+exit 0

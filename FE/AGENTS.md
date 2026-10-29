@@ -7,7 +7,7 @@
 
 - 프론트엔드 기술 스택은 Vue 3, TypeScript, Vite, Vue Router, Pinia, Axios, SCSS입니다.
 - 화면 구현 기준은 `docs/notion/화면 기반 개발 요구 문서.md`를 1순위로 사용합니다.
-- 기능 범위 기준은 `docs/notion/기능 정의서.md`를 사용합니다.
+- 기능 범위 기준은 루트 `docs/references/feature-spec.md`를 사용합니다(`docs/notion/기능 정의서.md`는 그 문서를 가리킵니다).
 - 디자인 토큰과 시각 규칙은 `docs/notion/프론트엔드 디자인 구현 규칙.md`를 사용합니다.
 - Vue 코드 작성 방식은 `docs/notion/프론트엔드 개발 공통 규칙.md`를 사용합니다.
 - FE 작업은 `FE/` 내부만 수정합니다. `BE/`, `AI/`, `infra/` 등 다른 파트는 읽기만 하며 직접 수정하지 않습니다.
@@ -20,7 +20,7 @@
 
 ## 다른 파트 요청
 
-BE/AI 코드는 직접 수정하지 않습니다. BE나 AI 쪽 변경이 필요하면 `docs/requests/BE/` 또는 `docs/requests/AI/`(루트 기준)에 md로 요청 문서를 남깁니다. 형식은 루트 `docs/requests/README.md` 참고.
+BE/AI 코드는 직접 수정하지 않습니다. BE나 AI 쪽 변경이 필요하면 `docs/requests/`(루트 기준)에 요청 문서를 남깁니다. 파일 이름·상태·형식은 루트 `docs/requests/README.md` 참고. 처리한 요청 문서는 지우지 않고 상태만 바꿉니다.
 
 ## 자료 우선순위
 
