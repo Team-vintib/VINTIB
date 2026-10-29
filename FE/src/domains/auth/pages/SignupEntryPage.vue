@@ -1,0 +1,228 @@
+<script setup lang="ts">
+import { ref } from 'vue'
+
+import googleLogoImage from '@/assets/images/google-logo.png'
+import logoImage from '@/assets/images/logo-white.png'
+import { startGoogleOAuth } from '@/domains/auth/utils/googleOAuth'
+import { ROUTE_NAMES } from '@/shared/constants/routes'
+import AuthLayout from '@/shared/layouts/AuthLayout.vue'
+
+const isRedirecting = ref(false)
+const errorMessage = ref('')
+
+const handleGoogleSignup = async () => {
+  if (isRedirecting.value) {
+    return
+  }
+
+  errorMessage.value = ''
+  isRedirecting.value = true
+
+  try {
+    await startGoogleOAuth('signup')
+  } catch (error: unknown) {
+    errorMessage.value =
+      error instanceof Error ? error.message : '네트워크 연결을 확인한 뒤 다시 시도해 주세요.'
+    isRedirecting.value = false
+  }
+}
+</script>
+
+<template>
+  <AuthLayout>
+    <article
+      class="signup-entry-card rounded-[var(--radius-card)] border border-[var(--color-border)] bg-[var(--color-surface)] p-8 shadow-sm"
+      aria-labelledby="signup-entry-title"
+    >
+      <header class="signup-entry-header">
+        <RouterLink
+          class="signup-entry-header__logo-link"
+          :to="{ name: ROUTE_NAMES.HOME }"
+          aria-label="VinTib 홈"
+        >
+          <img class="signup-entry-header__logo" :src="logoImage" alt="VinTib" />
+        </RouterLink>
+        <h1
+          id="signup-entry-title"
+          class="signup-entry-header__title text-[var(--color-text-primary)]"
+        >
+          회원가입
+        </h1>
+        <p class="signup-entry-header__description text-[var(--color-text-secondary)]">
+          VinTib에서 사용할 가입 방식을 선택해주세요.
+        </p>
+      </header>
+
+      <section class="signup-entry-actions" aria-label="회원가입 방식 선택">
+        <RouterLink class="signup-entry-primary-link" :to="{ name: ROUTE_NAMES.AUTH_SIGNUP_EMAIL }">
+          이메일로 가입하기
+        </RouterLink>
+
+        <button
+          class="signup-entry-secondary-link signup-entry-google"
+          type="button"
+          :disabled="isRedirecting"
+          @click="handleGoogleSignup"
+        >
+          <img class="signup-entry-google__icon" :src="googleLogoImage" alt="" aria-hidden="true" />
+          Google로 가입하기
+        </button>
+      </section>
+
+      <p v-if="errorMessage" class="signup-entry-error" role="alert">
+        {{ errorMessage }}
+      </p>
+
+      <footer class="signup-entry-footer">
+        이미 계정이 있나요?
+        <RouterLink class="signup-entry-footer__link" :to="{ name: ROUTE_NAMES.AUTH_LOGIN }">
+          로그인하기
+        </RouterLink>
+      </footer>
+    </article>
+  </AuthLayout>
+</template>
+
+<style scoped lang="scss">
+.signup-entry-card {
+  width: 100%;
+  padding: var(--space-8);
+}
+
+.signup-entry-header {
+  margin-bottom: var(--space-10);
+}
+
+.signup-entry-header__logo-link {
+  display: block;
+  width: min(180px, 52vw);
+  margin-right: auto;
+  margin-bottom: var(--space-2);
+  margin-left: auto;
+  border-radius: var(--radius-control);
+}
+
+.signup-entry-header__logo {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+.signup-entry-header__title {
+  font-size: var(--font-size-4xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-4xl);
+}
+
+.signup-entry-header__description {
+  margin-top: var(--space-3);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+}
+
+.signup-entry-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.signup-entry-primary-link,
+.signup-entry-secondary-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: var(--button-height-major);
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-control);
+  transition:
+    background-color var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base),
+    transform var(--transition-base);
+}
+
+.signup-entry-primary-link {
+  border: 1px solid transparent;
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+
+.signup-entry-primary-link:hover {
+  background: var(--color-primary-hover);
+}
+
+.signup-entry-secondary-link {
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+}
+
+.signup-entry-secondary-link:hover {
+  background: var(--color-surface-secondary);
+}
+
+.signup-entry-google {
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.signup-entry-google__icon {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-control);
+}
+
+.signup-entry-primary-link:focus-visible,
+.signup-entry-secondary-link:focus-visible,
+.signup-entry-header__logo-link:focus-visible,
+.signup-entry-footer__link:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-primary);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.signup-entry-primary-link:active,
+.signup-entry-secondary-link:active {
+  transform: translateY(1px);
+}
+
+.signup-entry-error {
+  margin-top: var(--space-4);
+  color: var(--color-error);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-snug);
+  text-align: center;
+}
+
+.signup-entry-footer {
+  margin-top: var(--space-6);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-button-small);
+  line-height: var(--line-height-control);
+  text-align: center;
+}
+
+.signup-entry-footer__link {
+  color: var(--color-primary);
+  font-weight: var(--font-weight-bold);
+}
+
+@media (max-width: 560px) {
+  .signup-entry-card {
+    padding: var(--space-6);
+  }
+
+  .signup-entry-header {
+    margin-bottom: var(--space-8);
+  }
+
+  .signup-entry-header__title {
+    font-size: var(--font-size-3xl);
+    line-height: var(--line-height-3xl);
+  }
+}
+</style>

@@ -1,0 +1,216 @@
+#!/bin/sh
+# develop-BE 병합 시 EC2 자동 배포 (S15P11A108-262)
+#
+# GitLab CI 의 deploy 잡에서 실행된다. 잡 컨테이너에는 아래가 마운트되어 있다.
+#   /var/run/docker.sock          호스트 도커 데몬
+#   /home/ubuntu/vintib           배포 디렉터리 (호스트와 동일 경로)
+# 동일 경로로 마운트하는 이유: compose 의 bind mount(Caddyfile 등)는 데몬이 있는
+# 호스트 파일시스템 기준으로 해석되므로, 잡 안에서의 경로와 어긋나면 안 된다.
+#
+# 흐름: 코드 동기화 → .env 생성 → 빌드·기동 → 헬스체크 → 실패 시 직전 이미지로 롤백
+set -eu
+
+DEPLOY_DIR=/home/ubuntu/vintib
+COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml -p vintib"
+HEALTH_TIMEOUT=180
+# 브라우저가 실제로 여는 주소. presigned·공개 이미지 URL 이 이 값으로 서명된다.
+# infra/caddy/Caddyfile 의 사이트 주소와 반드시 같아야 한다 (서명에 Host 가 포함됨).
+PUBLIC_ORIGIN=https://i15a108.p.ssafy.io
+
+log() { echo "[deploy] $*"; }
+
+# ---------- 0. 직전 배포 태그 기록 (롤백용) ----------
+PREVIOUS_TAG=""
+if [ -f "$DEPLOY_DIR/.env" ]; then
+    PREVIOUS_TAG=$(grep '^IMAGE_TAG=' "$DEPLOY_DIR/.env" 2>/dev/null | cut -d= -f2 || true)
+fi
+log "직전 태그: ${PREVIOUS_TAG:-(없음)} → 새 태그: $IMAGE_TAG"
+
+# ---------- 1. 코드 동기화 ----------
+# .env 는 아래에서 새로 만들고, _disabled/ 는 운영 안전장치라 보존한다.
+log "코드 동기화 → $DEPLOY_DIR"
+rsync -a --delete \
+    --exclude '.git' \
+    --exclude '.env' \
+    --exclude '_disabled' \
+    "$CI_PROJECT_DIR/" "$DEPLOY_DIR/"
+
+# 운영 디렉터리에 override 가 있으면 -f 없이 기동했을 때 DB·Redis 가 노출된다.
+# 동기화로 다시 들어왔을 수 있으므로 격리한다.
+if [ -f "$DEPLOY_DIR/docker-compose.override.yml" ]; then
+    mkdir -p "$DEPLOY_DIR/_disabled"
+    mv "$DEPLOY_DIR/docker-compose.override.yml" \
+       "$DEPLOY_DIR/_disabled/docker-compose.override.yml.disabled"
+    log "override 파일 격리함"
+fi
+
+# ---------- 2. .env 생성 (GitLab CI/CD Variables) ----------
+# ⚠️ DB_PASSWORD 는 PostgreSQL 볼륨을 처음 만들 때의 값과 같아야 한다.
+#    값을 바꾸면 볼륨을 지우거나 ALTER USER 를 해야 백엔드가 붙는다.
+# 운영 비밀번호는 PROD_DB_PASSWORD 로 받는다. DB_PASSWORD 라는 이름을 쓰면
+# 프로젝트 변수가 be-test 의 테스트용 DB_PASSWORD 까지 덮어써 테스트가 깨진다.
+#
+# ⚠️ MINIO_ROOT_USER/PASSWORD 도 DB 와 똑같은 함정이 있다. MinIO 는 이 값을 minio-data
+#    볼륨을 처음 만들 때의 값으로 굳히므로, 나중에 바꾸면 백엔드의 서명 검증이 전부
+#    실패한다(고치려면 볼륨을 지워야 하고 = 업로드된 이미지가 전부 사라진다).
+#    이름에 PROD_ 접두사를 쓰는 이유도 DB 와 같다 — be-test 잡의 MinIO 서비스
+#    컨테이너가 MINIO_ROOT_USER 를 job 변수로 쓰는데, 프로젝트 변수가 그걸 이긴다.
+
+# heredoc 확장 전에 필수 변수를 먼저 전부 검사한다.
+# 이유 두 가지:
+#   1) set -u 만 믿으면 위에서부터 하나씩 터져, CI/CD Variables 를 한 번에 못 채운다.
+#   2) `cat > .env` 는 리다이렉션이 먼저 처리되므로 확장이 실패하면 운영 .env 가
+#      빈 파일로 남는다 → 다음 배포의 롤백 기준 태그(PREVIOUS_TAG)까지 사라진다.
+#
+# ⚠️ PROD_LIVEKIT_NODE_IP 는 EC2 공인 IP 다. 비어 있으면 미디어 서버가 컨테이너 사설
+#    IP(172.x)를 ICE 후보로 뿌려서 브라우저가 영상에 붙지 못한다 — **에러 없이 화면만
+#    검게 나오는** 형태라 원인을 찾기 어렵다. 그래서 필수 변수로 둔다.
+REQUIRED_VARS="DB_NAME DB_USERNAME PROD_DB_PASSWORD IMAGE_TAG CORS_ALLOWED_ORIGINS
+PROD_MINIO_ROOT_USER PROD_MINIO_ROOT_PASSWORD PROD_MAIL_USERNAME PROD_MAIL_PASSWORD
+PROD_OPENVIDU_API_KEY PROD_OPENVIDU_API_SECRET PROD_OPENVIDU_SERVER_URL PROD_LIVEKIT_NODE_IP
+PROD_TOSS_SECRET_KEY PROD_TOSS_CLIENT_KEY PROD_JWT_SECRET WORKER_API_KEY"
+
+# 택배 배송 조회(deliveryapi.co.kr, SY034)는 필수가 아니다 — 비어 있으면 DeliveryTrackingClient가
+# 즉시-확정 폴백으로 동작하므로, REQUIRED_VARS 에는 넣지 않는다(등록 전에도 배포가 막히면 안 된다).
+#
+# 포인트 충전 토스페이먼츠(SY035)는 폴백이 없어 REQUIRED_VARS 에 넣는다 — 비어 있으면 결제
+# 승인 자체가 항상 실패하므로, 조용히 배포되기보다 배포 단계에서 막히는 게 낫다.
+#
+# WORKER_API_KEY 는 AI 워커(FastAPI)와 백엔드가 주고받는 내부 인증 키다. AI 쪽
+# _check_worker_key() 가 값이 비어 있으면 무조건 401을 던지도록 짜여 있어 폴백이 없다.
+#
+# 구글 로그인(SY039)도 필수가 아니다 — 비어 있으면 그 로그인 방법만 실패로 거절되고
+# 이메일/비밀번호 로그인 등 나머지 기능은 그대로 동작하므로 REQUIRED_VARS 에 넣지 않는다.
+#
+# REDIS_PASSWORD / GMS_API_KEY / PRICING_COMPS_SOURCE / PRICING_ATTRIBUTE_EXTRACTOR 도
+# REQUIRED_VARS 에 넣지 않는다 — 비어 있어도 각각 무인증 Redis, mock/regex 폴백(AI 쪽
+# 커밋 기본값)으로 안전하게 동작한다. 과거 이 네 개가 heredoc 자체에서 통째로 빠져 있어서,
+# 서버 .env 에 수동으로 값을 넣어도 다음 배포 때마다 흔적 없이 초기화되는 문제가 있었다.
+
+missing=""
+for name in $REQUIRED_VARS; do
+    eval "value=\${$name:-}"
+    [ -n "$value" ] || missing="$missing $name"
+done
+if [ -n "$missing" ]; then
+    log "!! 필수 CI/CD Variable 이 비어 있다:$missing"
+    log "   GitLab → Settings → CI/CD → Variables 에서 등록한다."
+    log "   (Protected 로 등록하려면 develop-BE 도 protected 브랜치여야 한다)"
+    exit 1
+fi
+
+log ".env 생성"
+umask 077
+# 임시 파일에 쓴 뒤 교체한다. 중간에 실패해도 기존 .env 가 살아남는다.
+cat > "$DEPLOY_DIR/.env.tmp" <<ENV
+DB_NAME=${DB_NAME}
+DB_USERNAME=${DB_USERNAME}
+DB_PASSWORD=${PROD_DB_PASSWORD}
+JWT_SECRET=${PROD_JWT_SECRET}
+SPRING_PROFILES_ACTIVE=prod
+SERVER_PORT=8080
+IMAGE_TAG=${IMAGE_TAG}
+WORKER_API_KEY=${WORKER_API_KEY}
+CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+MINIO_ROOT_USER=${PROD_MINIO_ROOT_USER}
+MINIO_ROOT_PASSWORD=${PROD_MINIO_ROOT_PASSWORD}
+MAIL_USERNAME=${PROD_MAIL_USERNAME}
+MAIL_PASSWORD=${PROD_MAIL_PASSWORD}
+AWS_S3_PUBLIC_ENDPOINT=${PUBLIC_ORIGIN}
+OPENVIDU_API_KEY=${PROD_OPENVIDU_API_KEY}
+OPENVIDU_API_SECRET=${PROD_OPENVIDU_API_SECRET}
+OPENVIDU_SERVER_URL=${PROD_OPENVIDU_SERVER_URL}
+OPENVIDU_API_URL=http://livekit:7880
+LIVEKIT_NODE_IP=${PROD_LIVEKIT_NODE_IP}
+DELIVERY_API_KEY=${PROD_DELIVERY_API_KEY:-}
+DELIVERY_API_SECRET_KEY=${PROD_DELIVERY_API_SECRET_KEY:-}
+DELIVERY_API_ENDPOINT_ID=${PROD_DELIVERY_API_ENDPOINT_ID:-}
+DELIVERY_API_WEBHOOK_SECRET=${PROD_DELIVERY_API_WEBHOOK_SECRET:-}
+TOSS_SECRET_KEY=${PROD_TOSS_SECRET_KEY}
+TOSS_CLIENT_KEY=${PROD_TOSS_CLIENT_KEY}
+GOOGLE_OAUTH_CLIENT_ID=${PROD_GOOGLE_OAUTH_CLIENT_ID:-}
+GOOGLE_OAUTH_CLIENT_SECRET=${PROD_GOOGLE_OAUTH_CLIENT_SECRET:-}
+REDIS_PASSWORD=${PROD_REDIS_PASSWORD:-}
+GMS_API_KEY=${PROD_GMS_API_KEY:-}
+PRICING_COMPS_SOURCE=${PROD_PRICING_COMPS_SOURCE:-mock}
+PRICING_ATTRIBUTE_EXTRACTOR=${PROD_PRICING_ATTRIBUTE_EXTRACTOR:-regex}
+ENV
+mv "$DEPLOY_DIR/.env.tmp" "$DEPLOY_DIR/.env"
+
+cd "$DEPLOY_DIR"
+
+# ---------- 3. 빌드 및 기동 ----------
+log "이미지 빌드 (태그 $IMAGE_TAG)"
+$COMPOSE build
+
+log "서비스 교체"
+$COMPOSE up -d
+
+# Caddyfile 은 bind mount 라 **내용이 바뀌어도 compose 가 컨테이너를 다시 만들지 않는다.**
+# Caddy 는 기동 시 한 번만 설정을 읽으므로, 그대로 두면 새 라우팅이 반영되지 않은 채
+# 배포가 "성공"으로 끝난다 — 실제로 -448 에서 /rtc 라우팅이 이 이유로 누락됐다.
+# reload 는 무중단이고, 설정이 잘못되면 기존 설정을 유지한 채 실패한다.
+# ⚠️ reload 가 "성공"해도 옛 설정일 수 있다 — 이게 -514 의 핵심이다.
+#    리눅스에서 파일 단위 bind mount 는 inode 에 묶이는데, rsync 가 rename 으로 파일을
+#    갈아치우면 컨테이너는 옛 inode 를 계속 본다. reload 는 그 옛 파일을 성실히 다시 읽고
+#    성공을 보고한다. 그래서 종료 코드만으로는 반영 여부를 알 수 없다.
+#
+#    마운트를 디렉터리로 바꿔(-514) 원인은 없앴지만, 확인 없이 믿지 않는다.
+#    **호스트 파일과 컨테이너가 보는 파일을 직접 대조**하고, 어긋나면 재시작한다.
+log "Caddy 설정 반영"
+HOST_SUM=$(md5sum "$DEPLOY_DIR/infra/caddy/Caddyfile" 2>/dev/null | cut -d' ' -f1)
+CTR_SUM=$(docker exec vintib-caddy md5sum /etc/caddy/Caddyfile 2>/dev/null | cut -d' ' -f1)
+
+if [ -n "$HOST_SUM" ] && [ "$HOST_SUM" != "$CTR_SUM" ]; then
+    # 컨테이너가 옛 파일을 보고 있다. reload 로는 못 고친다 — 재시작해야 다시 마운트된다.
+    log "  컨테이너가 옛 Caddyfile 을 보고 있다 (host=$HOST_SUM ctr=$CTR_SUM) — 재시작"
+    docker restart vintib-caddy >/dev/null && log "  Caddy 재시작 완료" \
+        || log "  !! Caddy 재시작 실패 — 라우팅이 옛 설정이다. 수동 확인 필요"
+elif docker exec vintib-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+    # 파일은 최신이다. reload 는 무중단이라 이쪽을 우선한다.
+    log "  Caddy reload 완료"
+else
+    # 문법 오류 등으로 reload 가 거부됐다. 재시작하면 Caddy 가 아예 못 뜰 수 있으므로
+    # 옛 설정으로 서비스를 계속하게 두고 경고만 남긴다.
+    log "  !! Caddy reload 실패 — 라우팅이 옛 설정일 수 있다. Caddyfile 문법을 확인할 것"
+fi
+
+# ---------- 4. 헬스체크 ----------
+# backend 가 healthy 가 되어야 배포 성공으로 본다.
+log "헬스체크 (최대 ${HEALTH_TIMEOUT}초)"
+elapsed=0
+healthy=""
+while [ "$elapsed" -lt "$HEALTH_TIMEOUT" ]; do
+    status=$(docker inspect -f '{{.State.Health.Status}}' vintib-backend 2>/dev/null || echo "none")
+    if [ "$status" = "healthy" ]; then
+        healthy="yes"
+        break
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+done
+
+# ---------- 5. 실패 시 롤백 ----------
+if [ -z "$healthy" ]; then
+    log "!! 헬스체크 실패 (backend 상태: ${status:-unknown})"
+    docker logs --tail 50 vintib-backend 2>&1 || true
+
+    if [ -n "$PREVIOUS_TAG" ] && [ "$PREVIOUS_TAG" != "$IMAGE_TAG" ]; then
+        log "직전 이미지($PREVIOUS_TAG)로 롤백 시도"
+        sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$PREVIOUS_TAG/" "$DEPLOY_DIR/.env"
+        $COMPOSE up -d
+        log "롤백 완료 — 배포는 실패로 처리한다"
+    else
+        log "롤백할 직전 이미지가 없다"
+    fi
+    exit 1
+fi
+
+log "배포 성공 — backend healthy"
+$COMPOSE ps
+
+# ---------- 6. 디스크 정리 ----------
+# 러너와 런타임이 동거해 이미지가 빠르게 쌓인다.
+# dangling 이미지만 지우므로 롤백용 직전 태그 이미지는 남는다.
+log "dangling 이미지 정리"
+docker image prune -f >/dev/null 2>&1 || true

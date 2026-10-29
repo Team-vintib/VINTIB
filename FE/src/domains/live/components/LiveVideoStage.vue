@@ -1,0 +1,458 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+
+import { connectLiveVideo, type LiveVideoSession } from '@/domains/live/api/liveVideoRoom'
+
+import type { LiveWatchStatus } from '@/domains/live/types/liveWatch.types'
+
+const props = withDefaults(
+  defineProps<{
+    title: string
+    posterUrl: string | null
+    status: LiveWatchStatus
+    liveId?: number | null
+    tryOnDisabled?: boolean
+    tryOnOpen?: boolean
+    showTryOn?: boolean
+    // 우측 패널 진입 버튼 — 경매가 걸렸으면 '경매 참여', 아니면 '상품 보기' 하나만 띄운다.
+    showAuctionJoin?: boolean
+    showProductOpen?: boolean
+    productOpenDisabled?: boolean
+    connectionLabel?: string
+    showReminder?: boolean
+    reminderActive?: boolean
+  }>(),
+  {
+    liveId: null,
+    tryOnDisabled: false,
+    tryOnOpen: false,
+    showTryOn: true,
+    showAuctionJoin: false,
+    showProductOpen: false,
+    productOpenDisabled: false,
+    connectionLabel: '',
+    showReminder: false,
+    reminderActive: false,
+  },
+)
+
+const emit = defineEmits<{
+  openTryOn: []
+  openAuction: []
+  openProduct: []
+  toggleReminder: []
+}>()
+
+const videoEl = ref<HTMLVideoElement | null>(null)
+const videoState = ref<'idle' | 'connecting' | 'connected' | 'failed'>('idle')
+let session: LiveVideoSession | null = null
+let connectSeq = 0
+
+const isStreaming = computed(() => videoState.value === 'connected')
+
+const startVideo = async () => {
+  if (
+    props.status !== 'LIVE' ||
+    !props.liveId ||
+    !videoEl.value ||
+    session ||
+    videoState.value === 'connecting'
+  ) {
+    return
+  }
+
+  const seq = ++connectSeq
+  videoState.value = 'connecting'
+
+  try {
+    const nextSession = await connectLiveVideo(props.liveId, videoEl.value, () => {
+      if (session === nextSession) {
+        session = null
+        videoState.value = 'idle'
+      }
+    })
+
+    // 연결하는 사이 status가 바뀌었으면(예: 종료) 방금 붙은 세션을 즉시 정리한다.
+    if (seq !== connectSeq) {
+      void nextSession.disconnect()
+      return
+    }
+
+    session = nextSession
+    videoState.value = 'connected'
+  } catch {
+    if (seq === connectSeq) {
+      videoState.value = 'failed'
+    }
+  }
+}
+
+const stopVideo = async () => {
+  connectSeq += 1
+  const current = session
+  session = null
+  videoState.value = 'idle'
+
+  if (current) {
+    await current.disconnect()
+  }
+}
+
+watch(
+  () => props.status,
+  (status) => {
+    if (status === 'LIVE') {
+      void startVideo()
+    } else {
+      void stopVideo()
+    }
+  },
+)
+
+onMounted(() => {
+  if (props.status === 'LIVE') {
+    void startVideo()
+  }
+})
+
+onBeforeUnmount(() => {
+  void stopVideo()
+})
+
+const stageMessage = computed(() => {
+  if (props.status === 'LIVE') {
+    if (videoState.value === 'connecting') return '영상 연결 중'
+    if (videoState.value === 'failed') return '영상을 불러오지 못했습니다'
+    if (videoState.value !== 'connected' && props.connectionLabel) return props.connectionLabel
+    return ''
+  }
+
+  if (props.status === 'SCHEDULED') return '방송 시작 전입니다'
+  if (props.status === 'ENDED') return '종료된 라이브입니다'
+  if (props.status === 'CANCELED') return '취소된 라이브입니다'
+  return '스트리밍 연결 전 미리보기'
+})
+</script>
+
+<template>
+  <section class="live-video-stage" aria-label="라이브 영상 영역">
+    <video
+      v-show="isStreaming"
+      ref="videoEl"
+      class="live-video-stage__media"
+      autoplay
+      playsinline
+    ></video>
+    <img v-if="posterUrl" v-show="!isStreaming" :src="posterUrl" :alt="`${title} 방송 미리보기`" />
+    <div v-else v-show="!isStreaming" class="live-video-stage__fallback" aria-hidden="true">
+      <svg viewBox="0 0 24 24">
+        <path d="m15 10 5-3v10l-5-3v-4Z" />
+        <rect x="3" y="5" width="12" height="14" rx="2" />
+      </svg>
+    </div>
+
+    <div class="live-video-stage__shade" aria-hidden="true"></div>
+    <div class="live-video-stage__overlay">
+      <slot name="overlay"></slot>
+    </div>
+
+    <div v-if="stageMessage" class="live-video-stage__notice" role="status">
+      <span aria-hidden="true"></span>
+      {{ stageMessage }}
+    </div>
+
+    <button
+      v-if="showReminder"
+      class="live-video-stage__reminder"
+      :class="{ 'live-video-stage__reminder--active': reminderActive }"
+      type="button"
+      :aria-pressed="reminderActive"
+      @click="emit('toggleReminder')"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+        <path d="M10.3 21a2 2 0 0 0 3.4 0" />
+      </svg>
+      {{ reminderActive ? '알림 받는 중' : '시작 알림 받기' }}
+    </button>
+
+    <!-- 우하단 액션 더미 — 경매 참여가 위, AI 시착이 아래. 한쪽이 안 뜨면 남은 하나가
+         그대로 우하단에 붙는다. -->
+    <div class="live-video-stage__actions">
+      <button
+        v-if="showProductOpen"
+        class="live-video-stage__try-on"
+        type="button"
+        :disabled="productOpenDisabled"
+        title="선택한 상품 정보 열기"
+        @click="emit('openProduct')"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 7h12l-1 13H7L6 7Z" />
+          <path d="M9 7a3 3 0 0 1 6 0" />
+        </svg>
+        상품 보기
+      </button>
+
+      <button
+        v-if="showAuctionJoin"
+        class="live-video-stage__auction"
+        type="button"
+        title="진행 중인 경매 열기"
+        @click="emit('openAuction')"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m14 6-6 6 3 3 6-6-3-3Z" />
+          <path d="m16.5 3.5 4 4" />
+          <path d="M4 20h9" />
+        </svg>
+        경매 참여
+      </button>
+
+      <button
+        v-if="showTryOn && !tryOnOpen"
+        class="live-video-stage__try-on"
+        type="button"
+        :disabled="tryOnDisabled"
+        aria-label="선택한 상품 AI 시착"
+        :title="
+          tryOnDisabled
+            ? '라이브 중 선택한 상품이 있을 때 AI 시착을 이용할 수 있습니다.'
+            : '선택한 상품 AI 시착 열기'
+        "
+        @click="emit('openTryOn')"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m12 3 1.35 4.15L17.5 8.5l-4.15 1.35L12 14l-1.35-4.15L6.5 8.5l4.15-1.35L12 3Z" />
+          <path d="m18.5 14 0.8 2.2 2.2 0.8-2.2 0.8-0.8 2.2-0.8-2.2-2.2-0.8 2.2-0.8 0.8-2.2Z" />
+        </svg>
+        AI 시착
+      </button>
+    </div>
+  </section>
+</template>
+
+<style scoped lang="scss">
+.live-video-stage {
+  display: grid;
+  position: relative;
+  min-width: 0;
+  min-height: 420px;
+  overflow: hidden;
+  background: #080a09;
+  isolation: isolate;
+  place-items: center;
+}
+
+.live-video-stage > img,
+.live-video-stage__fallback,
+.live-video-stage__media {
+  position: absolute;
+  z-index: -3;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.live-video-stage > img,
+.live-video-stage__media {
+  object-fit: cover;
+}
+
+.live-video-stage__fallback {
+  display: grid;
+  background:
+    radial-gradient(circle at 50% 30%, rgba(255, 255, 255, 0.08), transparent 40%),
+    var(--color-live-background);
+  color: var(--color-live-text-secondary);
+  place-items: center;
+}
+
+.live-video-stage__fallback svg {
+  width: 48px;
+  height: var(--button-height-standard);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.4;
+}
+
+.live-video-stage__shade {
+  position: absolute;
+  z-index: -2;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.08) 45%, rgba(0, 0, 0, 0.74) 100%),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.18), transparent 30%);
+}
+
+.live-video-stage__overlay {
+  position: absolute;
+  z-index: var(--z-layer-1);
+  inset: 0;
+  pointer-events: none;
+}
+
+.live-video-stage__notice {
+  display: inline-flex;
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  align-items: center;
+  min-height: var(--badge-height-md);
+  padding: 0 12px;
+  border: 1px solid rgba(242, 240, 237, 0.12);
+  border-radius: var(--radius-badge);
+  background: rgba(8, 8, 8, 0.7);
+  gap: 6px;
+  color: var(--color-live-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-badge);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  backdrop-filter: blur(8px);
+}
+
+.live-video-stage__notice span {
+  width: var(--space-1);
+  height: var(--space-1);
+  background: var(--color-accent);
+  animation: vtPulse var(--duration-pulse) ease-in-out infinite;
+}
+
+.live-video-stage__reminder {
+  display: inline-flex;
+  position: relative;
+  z-index: var(--z-layer-2);
+  align-items: center;
+  min-height: var(--button-height-compact);
+  padding: 0 var(--space-5);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-control);
+  background: var(--overlay-scrim-medium);
+  gap: var(--space-2);
+  color: var(--color-accent);
+  font-size: var(--font-size-button-small);
+  font-weight: var(--font-weight-medium);
+  backdrop-filter: blur(6px);
+}
+
+.live-video-stage__reminder--active {
+  background: var(--color-accent);
+  color: var(--color-primary-strong);
+}
+
+.live-video-stage__reminder svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.live-video-stage__reminder:focus-visible {
+  outline: 1px solid var(--color-primary-strong);
+  outline-offset: 2px;
+}
+
+.live-video-stage__actions {
+  display: flex;
+  position: absolute;
+  z-index: var(--z-layer-2);
+  right: var(--space-4);
+  bottom: var(--space-4);
+  align-items: flex-end;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.live-video-stage__auction,
+.live-video-stage__try-on {
+  display: inline-flex;
+  min-height: var(--button-height-compact);
+  width: 108px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-control);
+  background: var(--overlay-scrim-medium);
+  gap: var(--space-2);
+  color: var(--color-accent);
+  font-size: var(--font-size-button-small);
+  font-weight: var(--font-weight-medium);
+  backdrop-filter: blur(6px);
+  transition:
+    background-color var(--transition-base),
+    color var(--transition-base);
+}
+
+/* 경매 참여는 지금 눌러야 하는 행동이라 채워진 버튼으로 둔다(AI 시착은 테두리형). */
+.live-video-stage__auction {
+  border-color: var(--color-auction);
+  background: var(--color-auction);
+  color: var(--color-primary-strong);
+}
+
+.live-video-stage__auction:hover {
+  opacity: 0.92;
+}
+
+.live-video-stage__auction svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.live-video-stage__auction:focus-visible {
+  outline: 1px solid var(--color-primary-strong);
+  outline-offset: 2px;
+}
+
+.live-video-stage__try-on:hover:not(:disabled) {
+  background: var(--color-accent);
+  color: var(--color-primary-strong);
+}
+
+.live-video-stage__try-on:disabled {
+  cursor: not-allowed;
+  border-color: var(--color-border-input);
+  background: var(--overlay-scrim-medium);
+  color: var(--color-live-text-secondary);
+  opacity: 0.72;
+}
+
+.live-video-stage__try-on:focus-visible {
+  outline: 1px solid var(--color-primary-strong);
+  outline-offset: 2px;
+}
+
+.live-video-stage__try-on svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+@media (max-width: 960px) {
+  .live-video-stage {
+    min-height: 380px;
+  }
+}
+
+@media (max-width: 720px) {
+  .live-video-stage {
+    min-height: var(--surface-min-height-lg);
+  }
+}
+</style>

@@ -1,0 +1,162 @@
+# 라우팅 및 화면 이동 초안
+
+출처: `docs/notion/화면 기반 개발 요구 문서.md`
+
+## 인증 흐름
+
+```mermaid
+flowchart TD
+  SignupEntry["AUTH-001-0 /auth/signup"]
+  SignupEmail["AUTH-001 /auth/signup/email"]
+  Login["AUTH-002 /auth/login"]
+  SsafyLogin["AUTH-003 /auth/ssafy/login"]
+  SsafySignup["AUTH-003-1 /auth/ssafy/signup"]
+  SsafyCallback["AUTH-004-2 /auth/ssafy/callback"]
+  LinkAccount["AUTH-004 /auth/link-account"]
+  OnboardProfile["ONBOARD-001 /onboarding/basic-info"]
+  Home["HOME /"]
+
+  Login --> SignupEntry
+  Login --> Home
+  Login --> SsafyLogin
+  SignupEntry --> SignupEmail
+  SignupEntry --> SsafySignup
+  SignupEntry --> Login
+  SignupEmail --> OnboardProfile
+  SignupEmail --> Login
+  SsafyLogin --> SsafyCallback
+  SsafySignup --> SsafyCallback
+  SsafyCallback --> LinkAccount
+  SsafyCallback --> OnboardProfile
+  SsafyCallback --> Home
+  LinkAccount --> Login
+  LinkAccount --> OnboardProfile
+  LinkAccount --> Home
+```
+
+## 온보딩 흐름
+
+```mermaid
+flowchart TD
+  Profile["ONBOARD-001 /onboarding/basic-info"]
+  Interests["ONBOARD-002 /onboarding/interests"]
+  TryOn["ONBOARD-003 /onboarding/try-on"]
+  MemberType["ONBOARD-004 /onboarding/member-type"]
+  Biz["BIZ-001 /business/verification"]
+  BizPending["BIZ-001-2 /business/verification/pending"]
+  Home["HOME /"]
+
+  Profile --> Interests
+  Interests --> TryOn
+  TryOn --> MemberType
+  MemberType --> Home
+  MemberType --> Biz
+  Biz --> BizPending
+```
+
+## 홈 흐름
+
+```mermaid
+flowchart TD
+  Home["HOME /"]
+  GuestHome["GuestHome"]
+  MemberHome["MemberHome"]
+  Search["SEARCH /search?keyword=..."]
+  LiveList["LIVE /lives"]
+  LiveWatch["LIVE /lives/:liveId"]
+  ProductList["PROD-008 /products"]
+  ProductDetail["PROD-006 /products/:productId"]
+  FollowingHome["HOME-002 /following"]
+  Login["AUTH-002 /auth/login"]
+
+  Home --> GuestHome
+  Home --> MemberHome
+  GuestHome --> Search
+  GuestHome --> LiveList
+  GuestHome --> LiveWatch
+  GuestHome --> ProductList
+  GuestHome --> ProductDetail
+  GuestHome --> Login
+  MemberHome --> Search
+  MemberHome --> LiveList
+  MemberHome --> LiveWatch
+  MemberHome --> ProductList
+  MemberHome --> ProductDetail
+  MemberHome --> FollowingHome
+```
+
+## 상품 탐색 흐름
+
+```mermaid
+flowchart TD
+  ProductList["PROD-008 /products"]
+  ProductDetail["PROD-006 /products/:productId"]
+
+  ProductList -->|"상품 카드 선택"| ProductDetail
+```
+
+## 라우트 메타 초안
+
+| 라우트                    | 화면        | requiresAuth | guestOnly | 비고                                             |
+| ------------------------- | ----------- | ------------ | --------- | ------------------------------------------------ |
+| `/auth/login`             | AUTH-002    | false        | true      | 이메일 로그인, SSAFY 로그인 진입                 |
+| `/auth/signup`            | AUTH-001-0  | false        | true      | 회원가입 방식 선택                               |
+| `/auth/signup/email`      | AUTH-001    | false        | true      | 회원가입 성공 후 `/onboarding/basic-info` 이동   |
+| `/auth/ssafy`             | Legacy      | false        | true      | query 기준 SSO 로그인 또는 가입 route로 redirect |
+| `/auth/ssafy/login`       | AUTH-003    | false        | true      | SSAFY 로그인 시작 화면                           |
+| `/auth/ssafy/signup`      | AUTH-003-1  | false        | true      | SSAFY 가입 시작 화면                             |
+| `/auth/ssafy/callback`    | AUTH-004-2  | false        | false     | SSO callback 처리                                |
+| `/auth/link-account`      | AUTH-004    | false        | true      | 계정 연결 후보가 있을 때만 접근                  |
+| `/onboarding/basic-info`  | ONBOARD-001 | false        | false     | 가입 후 필수/보완 흐름                           |
+| `/onboarding/interests`   | ONBOARD-002 | false        | false     | 건너뛰기 가능                                    |
+| `/onboarding/try-on`      | ONBOARD-003 | false        | false     | 건너뛰기 가능                                    |
+| `/onboarding/member-type` | ONBOARD-004 | false        | false     | 회원가입 응답의 인증 토큰 계약 확정 전 임시      |
+| `/business/verification`  | BIZ-001     | false        | false     | 사업자 회원 정보 제출, 인증 계약 확정 전 임시    |
+| `/business/verification/pending` | BIZ-001-2 | false   | false     | FE 메모리 제출 상태가 없으면 BIZ-001로 이동      |
+| `/`                       | HOME        | false        | false     | 로그인 상태에 따라 비로그인/회원 홈 렌더링       |
+| `/following`              | HOME-002    | true         | false     | 팔로잉 홈 placeholder, 회원 홈 CTA에서 진입       |
+| `/search`                 | SEARCH      | false        | false     | 홈 검색 패널에서 `keyword` query로 진입, 실제 통합 검색 API의 상품·라이브·사용자 결과 표시, 사용자 프로필 이동·팔로우 토글 지원 |
+| `/lives`                  | LIVE        | false        | false     | 413·415·418 카드·필터·정렬·목록 상태 구현. BE 최종 009의 복수 카테고리·공통 PageResponse·nullable 시청자 정책을 adapter에 반영하기 전까지 mock 사용 |
+| `/products`               | PROD-008    | false        | false     | 공개 상품 목록 껍데기, 실제 조회 API 연동 대기   |
+| `/products/:productId`    | PROD-006    | false        | false     | 상품 상세 408·410·412 UI, 실제 API 대기           |
+| `/products/new`           | PROD-001~003 | true        | false     | 상품 등록 단계형 화면, 실제 등록 API 확정 전 mock adapter 사용 |
+| `/lives/new`              | LIVE 신규   | true         | false     | 라이브 시작 placeholder                          |
+| `/lives/:liveId`          | LIVE-005    | false        | false     | 419 전체 구조, 423 채팅·경매와 425 AI 시착 패널 mock UI 구현. 실제 스트리밍·채팅 STOMP·경매·AI API 연동 대기 |
+| `/notifications`          | NOTI        | true         | false     | 알림센터 목록·탭 필터·전체 탭 더보기·읽음 처리 UI 구현, 헤더 알림 팝업과 unread badge 연동 |
+| `/profile/me`             | MY/FOLLOW   | true         | false     | 로그인 사용자의 공개 프로필. 상품·라이브 탭, 팔로잉/팔로워 통계, 팔로워·팔로잉 목록 진입 지원 |
+| `/profile/:userId`        | MY/FOLLOW   | false        | false     | 공개 사용자 프로필. 타인 프로필에서는 팔로우/언팔로우 가능 |
+| `/profile/:userId/followers` | FOLLOW    | false        | false     | 팔로워 목록. 사용자 프로필 이동과 항목별 팔로우/언팔로우 지원 |
+| `/profile/:userId/following` | FOLLOW    | false        | false     | 팔로잉 목록. 사용자 프로필 이동과 항목별 팔로우/언팔로우 지원 |
+| `/my`                     | MY          | true         | false     | 기존 마이페이지 기본 진입은 `/profile/me`로 연결. `section` query가 있으면 기존 본인 전용 관리 섹션 유지 |
+| `/wishlist`               | MY-006/MY-009 | true      | false     | 찜 목록 독립 페이지. wish API 목록 조회·해제, 검색/필터, `전체 / 즉시 구매 / 경매 예정` 탭 구현 |
+| `/points`                 | POINT       | true         | false     | 포인트 지갑 화면 구현, mock fallback 사용        |
+
+## 2026-07-28 검색 흐름 보강
+
+```mermaid
+flowchart TD
+  HomeSearch["홈 검색 패널"]
+  SearchPage["SEARCH /search?keyword=...&type=...&page=..."]
+  ProductTab["상품 결과 탭"]
+  LiveTab["라이브 결과 탭"]
+  MemberTab["회원 결과 탭"]
+  ProductDetail["/products/:productId"]
+  LiveWatch["/lives/:liveId"]
+  Login["/auth/login?redirect=..."]
+
+  HomeSearch --> SearchPage
+  SearchPage --> ProductTab
+  SearchPage --> LiveTab
+  SearchPage --> MemberTab
+  SearchPage -->|"전체보기"| ProductTab
+  SearchPage -->|"전체보기"| LiveTab
+  SearchPage -->|"전체보기"| MemberTab
+  ProductTab --> ProductDetail
+  LiveTab --> LiveWatch
+  ProductTab -->|비로그인 찜| Login
+  MemberTab -->|비로그인 팔로우| Login
+```
+
+| 라우트 | 화면 | requiresAuth | guestOnly | 비고 |
+| --- | --- | --- | --- | --- |
+| `/search` | SEARCH-001/002 | false | false | `keyword`, `type`, `page`, `categories`, `conditions`, `saleTypes`, `minPrice`, `maxPrice`, `sort` query 기반 검색 결과 탭/전체보기/페이지네이션/필터/상태 화면. 실제 검색 API 대기 |

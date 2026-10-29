@@ -1,0 +1,279 @@
+# 베이스 정의 — 운영(EC2) 기준으로 안전한 기본값을 담는다.
+#
+# ⚠️ 이 파일에는 호스트 포트 publish를 절대 추가하지 않는다.
+#    Docker는 포트 publish 시 iptables를 직접 조작해 UFW를 우회하므로,
+#    여기에 ports를 적으면 PostgreSQL·Redis·FastAPI가 그대로 외부에 노출된다.
+#
+# 로컬 개발 : docker compose up -d
+#             → docker-compose.override.yml 이 자동 병합되어 개발용 포트가 열린다.
+# EC2 운영  : docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#             → override 를 타지 않도록 반드시 -f 를 명시한다.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: vintib-postgres
+    restart: unless-stopped
+    command: ["postgres", "-c", "shared_buffers=1GB"]
+    environment:
+      POSTGRES_DB: ${DB_NAME:-vintib}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      # PostgreSQL 18부터 마운트 지점이 /var/lib/postgresql/data → /var/lib/postgresql 로 바뀌었다.
+      # 이미지가 메이저 버전별 하위 디렉터리(/var/lib/postgresql/18/docker)를 직접 관리하며,
+      # 예전 경로에 마운트하면 기동 자체가 실패한다.
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - vintib-net
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d ${DB_NAME:-vintib}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-vector:
+    # AI 전용 벡터 저장소(가격 책정·품질 검수·추천 임베딩). BE가 쓰는 위 postgres와는 완전히
+    # 별개 인스턴스다 — 공유 스키마(schema.sql)를 건드리지 않으려고 분리했다(AI/docs/infra-architecture.md §3.6).
+    # 순정 postgres 이미지엔 pgvector 확장이 없어 이 전용 이미지를 쓴다.
+    image: pgvector/pgvector:pg18
+    container_name: vintib-postgres-vector
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${VECTOR_DB_NAME:-vintib_rag}
+      POSTGRES_USER: ${VECTOR_DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${VECTOR_DB_PASSWORD:-postgres}
+    volumes:
+      # pgvector/pgvector:pg18 도 공식 postgres:18 이미지를 베이스로 하므로 위 postgres
+      # 서비스와 같은 이유로 /var/lib/postgresql(데이터 디렉터리 아님)에 마운트한다.
+      - postgres-vector-data:/var/lib/postgresql
+    networks:
+      - vintib-net
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${VECTOR_DB_USERNAME:-postgres} -d ${VECTOR_DB_NAME:-vintib_rag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8.8-alpine
+    container_name: vintib-redis
+    restart: unless-stopped
+    # noeviction 필수 — 입찰 분산락·포인트 보류 상태가 메모리 압박으로 유실되면 안 된다.
+    command:
+      - redis-server
+      - --maxmemory
+      - 768mb
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis-data:/data
+    networks:
+      - vintib-net
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # S3 호환 오브젝트 스토리지. 팀에 AWS 계정이 없어(SSAFY 제공 EC2 한 대, 콘솔 없음)
+  # 운영에서도 실제 S3 대신 이 컨테이너를 쓴다 — 계획 JY006 참고.
+  # 외부 노출은 caddy 가 /vintib-public·/vintib-private 경로를 프록시해서만 이뤄진다.
+  minio:
+    # 다른 서비스와 같은 이유로 버전을 고정한다. latest 를 따라가면 운영 재배포 때
+    # 볼륨 포맷이나 정책 API 가 바뀌어도 알아채지 못한다.
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: vintib-minio
+    restart: unless-stopped
+    environment:
+      # ⚠️ Postgres 와 같은 함정 — 이 자격증명은 볼륨을 처음 만들 때의 값으로 굳는다.
+      #    나중에 바꾸려면 minio-data 볼륨을 지워야 한다(= 업로드된 이미지 전부 소멸).
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - vintib-net
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # WebRTC 미디어 서버 — OpenVidu v3 의 미디어 코어(LiveKit). S15P11A108-448
+  #
+  # ⚠️ OpenVidu v3 공식 번들(Community)을 통째로 올리지 않는다. 그 번들은 자체 Caddy·Redis·
+  #    MinIO·MongoDB·대시보드를 함께 띄우는데, 우리는 Caddy(443)·Redis·MinIO 를 이미 쓰고
+  #    있어 443 포트가 정면 충돌하고 메모리 예산(15GB)도 넘긴다.
+  #    OpenVidu v3 는 LiveKit 기반이라 미디어 코어만 올려도 클라이언트(livekit-client)·
+  #    서버 SDK·room 개념이 전부 동일하다. 자세한 판단은 BE/docs/infra/ec2.md 참고.
+  livekit:
+    image: livekit/livekit-server:v1.9.1
+    container_name: vintib-livekit
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      # "key: secret" 형태의 문자열. 백엔드의 OPENVIDU_API_* 와 반드시 같은 값이어야 한다 —
+      # 다르면 토큰 서명 검증이 전부 실패한다. 그래서 같은 변수에서 파생시킨다.
+      LIVEKIT_KEYS: "${OPENVIDU_API_KEY:-devkey}: ${OPENVIDU_API_SECRET:-devsecret-change-me-at-least-32-chars}"
+    volumes:
+      - ./infra/livekit/livekit.yaml:/etc/livekit.yaml:ro
+    networks:
+      - vintib-net
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7880/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./BE
+    image: vintib-backend:${IMAGE_TAG:-local}
+    container_name: vintib-backend
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
+      # ⚠️ 고정값이다. 환경변수로 바꿀 수 있게 열어 두지 않는다 — 우리 시각 필드는 전부
+      #    오프셋 없는 LocalDateTime 이라, 서버 타임존이 곧 API 계약(KST 벽시계)이다.
+      #    여기가 UTC 로 돌아가면 모든 시각이 9시간 어긋난다(BE/Dockerfile 주석 참고).
+      TZ: Asia/Seoul
+      # .env에 안 채우면 BE application.yml과 같은 로컬 기본값을 그대로 쓴다.
+      # IDE 등 컨테이너 밖에서 백엔드를 띄울 때와 토큰을 호환하려면 .env의 JWT_SECRET을 맞춰 준다.
+      JWT_SECRET: ${JWT_SECRET:-local-dev-only-secret-key-please-change-in-prod-0123456789}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-vintib}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AI_BASE_URL: http://ai:8000
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_S3_PUBLIC_BUCKET: ${AWS_S3_PUBLIC_BUCKET:-vintib-public}
+      AWS_S3_PRIVATE_BUCKET: ${AWS_S3_PRIVATE_BUCKET:-vintib-private}
+      # 스토리지가 MinIO 라 자격증명도 MinIO root 를 그대로 쓴다. minio 서비스와 같은
+      # 변수에서 파생시켜 둘이 어긋날 수 없게 한다 — 어긋나면 서명 검증이 통째로 실패한다.
+      # (훗날 실제 AWS S3 로 옮기면 이 두 줄만 별도 변수로 분리하면 된다)
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # 백엔드 자신의 호출(HeadObject 등)은 컨테이너 네트워크로 직접 간다.
+      AWS_S3_ENDPOINT: ${AWS_S3_ENDPOINT:-http://minio:9000}
+      # presigned·공개 URL 은 브라우저가 여는 것이라 외부에서 닿는 주소여야 한다.
+      # local 은 override.yml 이, 운영은 deploy.sh 가 .env 로 채운다.
+      AWS_S3_PUBLIC_ENDPOINT: ${AWS_S3_PUBLIC_ENDPOINT:-}
+      # 영상(OpenVidu/LiveKit). 브라우저용 주소와 내부 API 주소가 다르다 —
+      # 브라우저는 Caddy(443)를 거쳐 들어오고, 백엔드는 도커 네트워크 안에서 직접 붙는다.
+      OPENVIDU_SERVER_URL: ${OPENVIDU_SERVER_URL:-}
+      OPENVIDU_API_URL: ${OPENVIDU_API_URL:-http://livekit:7880}
+      OPENVIDU_API_KEY: ${OPENVIDU_API_KEY:-}
+      OPENVIDU_API_SECRET: ${OPENVIDU_API_SECRET:-}
+      OPENVIDU_TOKEN_TTL: ${OPENVIDU_TOKEN_TTL:-2h}
+      # 택배 배송 조회(deliveryapi.co.kr, SHIP-002). 비우면 즉시-확정 폴백으로 동작한다.
+      DELIVERY_API_KEY: ${DELIVERY_API_KEY:-}
+      DELIVERY_API_SECRET_KEY: ${DELIVERY_API_SECRET_KEY:-}
+      DELIVERY_API_ENDPOINT_ID: ${DELIVERY_API_ENDPOINT_ID:-}
+      DELIVERY_API_WEBHOOK_SECRET: ${DELIVERY_API_WEBHOOK_SECRET:-}
+      # 포인트 충전 결제위젯(토스페이먼츠, POINT-001). 폴백이 없어 비우면 충전 승인 자체가 실패한다.
+      TOSS_SECRET_KEY: ${TOSS_SECRET_KEY:-}
+      TOSS_CLIENT_KEY: ${TOSS_CLIENT_KEY:-}
+      # 구글 로그인(SY039, SSAFY SSO 대체). 비우면 /api/auth/google 호출 시 구글 쪽에서 인증
+      # 실패로 거절된다(폴백 없음 — 로그인 실패를 조용히 넘기면 안 됨).
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - vintib-net
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  ai:
+    build:
+      context: ./AI
+    image: vintib-ai:${IMAGE_TAG:-local}
+    container_name: vintib-ai
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-vintib}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      VECTOR_DB_HOST: postgres-vector
+      VECTOR_DB_PORT: 5432
+      VECTOR_DB_NAME: ${VECTOR_DB_NAME:-vintib_rag}
+      VECTOR_DB_USERNAME: ${VECTOR_DB_USERNAME:-postgres}
+      VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD:-postgres}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      WORKER_API_KEY: ${WORKER_API_KEY}
+      PUBLIC_BASE_URL: https://i15a108.p.ssafy.io
+      RESULTS_DIR: /app/results
+      # 가격 책정(app/pricing/)이 GMS 게이트웨이로 나갈 때 쓴다. 비어 있으면 mock 백엔드로
+      # 떨어지므로 컨테이너는 정상 기동한다 — 실시세가 필요할 때만 채운다.
+      GMS_API_KEY: ${GMS_API_KEY:-}
+      # 가격 책정(app/pricing/)이 신상품(정가) 조회에 쓰는 네이버 쇼핑 오픈API 키. 비어 있으면
+      # mock 백엔드로 떨어지므로 컨테이너는 정상 기동한다.
+      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
+      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      # 가격 책정 comps 백엔드 스왑(CH030). 커밋 기본값은 mock — 실전환은 이 배포 환경변수로만
+      # 한다(코드 커밋 금지, test_committed_defaults_are_mock가 강제). mock / internal_text /
+      # internal / internal_clip 중 하나. llm_web_search는 GMS 하드 룰 대상이라 여기서도 켜지 않는다.
+      PRICING_COMPS_SOURCE: ${PRICING_COMPS_SOURCE:-mock}
+      # 동일 상품 매칭 1단계(속성 추출) 백엔드 스왑(CH031). 커밋 기본값은 regex — llm 전환도
+      # 이 배포 환경변수로만 한다(GMS 하드 룰 대상, test_committed_defaults_are_regex가 강제).
+      PRICING_ATTRIBUTE_EXTRACTOR: ${PRICING_ATTRIBUTE_EXTRACTOR:-regex}
+    volumes:
+      - results-data:/app/results
+    depends_on:
+      postgres-vector:
+        condition: service_healthy
+    networks:
+      - vintib-net
+    mem_limit: 1g
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health')
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+networks:
+  vintib-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  postgres-vector-data:
+  redis-data:
+  minio-data:
+  results-data:

@@ -1,0 +1,260 @@
+# MR(Merge Request) 시점에만 동작하는 검증 전용 CI.
+# 배포(CD)는 포함하지 않음. 기술 스택은 아직 미확정 상태이므로,
+# 여기 적힌 이미지/버전은 "지금 각 파트 빌드 설정 파일(build.gradle,
+# package.json, requirements.txt)에 실제로 pin된 값"을 그대로 반영한 것.
+# 스택이 최종 확정/변경되면 해당 파트의 build 설정 파일과 함께
+# 아래 image 태그만 맞춰서 갱신하면 됨.
+
+stages:
+  - test
+  - deploy
+
+workflow:
+  rules:
+    # MR 검증
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # main 병합 시 자동 배포 (-262). 배포 브랜치는 main 하나다 — 아래 deploy 잡 주석 참고.
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+variables:
+  GIT_DEPTH: "1"
+
+# ---------- 문서/설정만 바뀐 MR ----------
+# 아래 파트별 잡(be-test/fe-test/ai-test)은 모두 changes: 필터가 걸려 있어, 파트 코드를
+# 건드리지 않는 MR(문서·계획서·.gitlab-ci.yml·docker-compose 등)에서는 생성되는 잡이 하나도
+# 없다. GitLab 은 잡이 0개인 파이프라인을 "No stages / jobs for this pipeline" 으로 거부하므로,
+# MR 이 파이프라인 실패로 표시되어 머지가 막힌다. 이 잡이 그 경우에만 실행되어 파이프라인이
+# 비지 않게 한다.
+#
+# rules 는 위에서부터 평가되고 첫 매칭에서 멈춘다 — 파트 코드가 하나라도 바뀌면 첫 규칙의
+# when: never 로 제외되고(그 파트 잡이 이미 검증한다), 그 외 MR 에서만 실행된다.
+docs-only:
+  stage: test
+  image: alpine:3.20
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "BE/**/*"
+        - "FE/**/*"
+        - "AI/**/*"
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - echo "파트 코드(BE/FE/AI) 변경이 없는 MR입니다. 빌드·검증 대상이 없어 통과 처리합니다."
+
+# ---------- BE (Java 21 / Spring Boot 4.1.0 / Gradle) ----------
+be-test:
+  stage: test
+  image: eclipse-temurin:21-jdk-jammy
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "BE/**/*"
+  services:
+    # docker-compose.yml과 동일 버전. application.yml이 DB_HOST/REDIS_HOST 등을
+    # 환경변수로 읽으므로, @SpringBootTest가 실제 컨테이너에 붙어 동작함.
+    #
+    # ⚠️ alias 를 이미지 이름(postgres/redis)과 같게 두면 러너가 자동 생성하는
+    #    별칭과 충돌해 "alias is already in use" 로 skip 되고, 그 결과 호스트명이
+    #    해석되지 않아 DB 연결이 실패한다. 충돌하지 않는 이름을 쓴다.
+    - name: postgres:18-alpine
+      alias: db
+    - name: redis:8.8-alpine
+      alias: cache
+    # S3BucketInitializer 는 AWS_S3_ENDPOINT 가 설정돼 있으면 기동 시 버킷 생성을 시도한다.
+    # 아래 before_script 가 그 값을 export 하므로 이 job 에는 MinIO 서비스가 반드시 있어야 한다.
+    # 없으면 ApplicationContext 로딩이 실패해 @SpringBootTest 전부가 깨진다.
+    # alias 는 이미지 이름(minio)과 겹치지 않게 s3 로 둔다 (db/cache 와 같은 이유).
+    - name: minio/minio:RELEASE.2025-09-07T16-13-09Z
+      alias: s3
+      command: ["server", "/data"]
+  variables:
+    # postgres 서비스 컨테이너가 읽는 값. 여기서 DB·계정이 만들어진다.
+    POSTGRES_DB: vintib
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    # minio 서비스 컨테이너가 읽는 값. 애플리케이션의 AWS_ACCESS_KEY_ID/SECRET 도 여기서 파생시킨다.
+    MINIO_ROOT_USER: minioadmin
+    MINIO_ROOT_PASSWORD: minioadmin
+  cache:
+    key: "be-gradle-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - BE/.gradle/
+  before_script:
+    - cd BE
+    - chmod +x gradlew
+    # ⚠️ 앱이 읽는 DB_*/REDIS_*/SPRING_* 는 반드시 여기서 export 로 고정한다.
+    #    프로젝트 CI/CD Variables 는 job 의 variables: 보다 우선하므로(프로젝트 변수 > job 변수),
+    #    운영용으로 등록해 둔 DB_NAME/DB_PASSWORD 같은 이름이 있으면 job variables 로는 막을 수 없다.
+    #    before_script 의 export 는 그 뒤에 실행되므로 확실히 이긴다.
+    #    값은 위 POSTGRES_* 에서 파생시켜, 서비스가 실제로 만든 DB·계정과 절대 어긋나지 않게 한다.
+    - export DB_HOST=db DB_PORT=5432
+    - export DB_NAME="$POSTGRES_DB" DB_USERNAME="$POSTGRES_USER" DB_PASSWORD="$POSTGRES_PASSWORD"
+    - export REDIS_HOST=cache REDIS_PORT=6379
+    - export SPRING_PROFILES_ACTIVE=local
+    # S3BucketInitializer 가 읽는 값. docker-compose.override.yml 의 minio 서비스와
+    # 동일한 자격증명(MINIO_ROOT_USER/PASSWORD)을 그대로 파생시킨다.
+    - export AWS_S3_ENDPOINT=http://s3:9000
+    - export AWS_ACCESS_KEY_ID="$MINIO_ROOT_USER" AWS_SECRET_ACCESS_KEY="$MINIO_ROOT_PASSWORD"
+    # 서비스 준비 확인. 여기서 끊으면 원인이 "DB 연결"임이 분명해진다.
+    # (없으면 Hibernate 가 dialect 결정 실패로 죽어 원인 파악이 어렵다)
+    # ⚠️ 콜론+공백이 든 명령은 반드시 따옴표로 감싼다. 안 그러면 YAML 이 맵으로 파싱해
+    #    GitLab 이 설정을 거부하고 잡이 실행조차 되지 않는다.
+    - 'getent hosts "$DB_HOST" || { echo "DNS 해석 실패 - $DB_HOST"; exit 1; }'
+    - 'timeout 30 bash -c "until (echo > /dev/tcp/$DB_HOST/$DB_PORT) 2>/dev/null; do sleep 1; done" || { echo "TCP 연결 실패 - $DB_HOST:$DB_PORT"; exit 1; }'
+    - 'timeout 30 bash -c "until (echo > /dev/tcp/$REDIS_HOST/$REDIS_PORT) 2>/dev/null; do sleep 1; done" || { echo "TCP 연결 실패 - $REDIS_HOST:$REDIS_PORT"; exit 1; }'
+    - 'timeout 30 bash -c "until (echo > /dev/tcp/s3/9000) 2>/dev/null; do sleep 1; done" || { echo "TCP 연결 실패 - s3:9000"; exit 1; }'
+    # TCP 가 열려도 인증이 틀리거나 DB 이름이 없으면 붙지 못한다.
+    # Hibernate 는 그 원인을 "Unable to determine Dialect" 로 덮어써 버리므로,
+    # 실제 로그인까지 여기서 미리 해 보고 psql 의 원문 오류로 원인을 특정한다.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends postgresql-client || echo "psql 설치 실패 - DB 인증 사전 점검을 건너뛴다"
+    - |
+      if command -v psql >/dev/null 2>&1; then
+        if ! PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_NAME" -c 'select 1' >/dev/null; then
+          echo "DB 인증/접속 실패 - ${DB_USERNAME}@${DB_HOST}:${DB_PORT}/${DB_NAME} (바로 위 psql 오류가 원인)"
+          exit 1
+        fi
+      fi
+  script:
+    - ./gradlew build --no-daemon --build-cache -Dgradle.user.home=.gradle
+
+
+# 모든 MR에서 최소 1개의 job을 실행하여 빈 파이프라인 방지
+mr-check:
+  stage: test
+  image: alpine:3.20
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - echo "MR pipeline initialized successfully."
+
+# ---------- FE (Vue 3.5 / Vite / TypeScript) ----------
+fe-test:
+  stage: test
+  image: node:22-alpine
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "FE/**/*"
+  cache:
+    key: "fe-npm-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - FE/node_modules/
+  before_script:
+    - cd FE
+    # package-lock.json이 아직 커밋되어 있지 않아 npm ci 대신 npm install 사용.
+    # 락파일이 생기면 npm ci로 바꿔서 재현 가능한 설치로 전환할 것.
+    - npm install
+  script:
+    - npm run lint
+    - npm run type-check
+    # 유닛 테스트 프레임워크(vitest 등)가 아직 설치되어 있지 않아
+    # lint + type-check + build를 현재 시점의 검증 게이트로 사용.
+    # 테스트 프레임워크 도입 시 여기에 test 스크립트 추가.
+    - npm run build
+
+# ---------- AI (Python 3.12 / FastAPI) ----------
+ai-test:
+  stage: test
+  image: python:3.12-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "AI/**/*"
+  cache:
+    key: "ai-pip-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - AI/.cache/pip
+  before_script:
+    - cd AI
+    - pip install --cache-dir .cache/pip -r requirements-dev.txt
+  script:
+    - ruff check .
+    - black --check .
+    # AI/에 아직 tests/ 디렉터리가 없어 pytest가 "no tests collected"(exit 5)를
+    # 반환함. 테스트가 추가되기 전까지는 이를 정상으로 처리하고,
+    # 그 외 실패(코드/의존성 문제 등)는 그대로 파이프라인을 실패시킴.
+    - >
+      pytest -q || code=$?; if [ "${code:-0}" -eq 5 ]; then
+        echo "No tests collected yet under AI/ - skipping as pass.";
+      elif [ "${code:-0}" -ne 0 ]; then
+        exit "${code}";
+      fi
+
+# ---------- 배포 (main 병합 시 EC2 자동 배포) ----------
+#
+# ⚠️ 배포 트리거는 **main 하나뿐이다.** 파트별 develop-* 를 각각 트리거로 걸면 안 된다.
+#
+# deploy.sh 는 트리거된 커밋 시점의 **저장소 전체**를 rsync 한다. 파트 브랜치를 트리거로 걸면
+# 나중에 배포하는 쪽이 항상 상대 파트를 되돌린다.
+#
+#   develop-FE 배포 → BE/ 도 develop-FE 시점 것으로 덮임 → BE 롤백
+#   develop-BE 배포 → FE/ 도 develop-BE 시점 것으로 덮임 → FE 롤백
+#
+# "서로 자주 머지하자"로는 못 막는다 — 양쪽이 서로를 포함하려면 두 브랜치가 같은 커밋이어야
+# 하기 때문이다. 파트가 셋(BE/FE/AI)이라 더 그렇다.
+#
+# main 은 이미 세 파트가 모이는 통합 브랜치이므로, 여기서 배포하면 어느 파트도 되돌아가지 않는다.
+# 배포 흐름: feat/* → develop-{BE,FE,AI} → main → 자동 배포
+# 자세한 내용은 BE/docs/infra/ec2.md 「배포 흐름」 참고.
+# 전용 러너(tag: deploy)에서만 실행된다. 그 러너에만 호스트 docker.sock 과
+# 배포 디렉터리가 마운트되어 있어, 일반 테스트 잡은 호스트 도커에 접근하지 못한다.
+#
+# 필요한 CI/CD Variables (Settings → CI/CD → Variables):
+#   PROD_DB_PASSWORD     운영 DB 비밀번호. Masked 권장.
+#                ⚠️ 프로젝트 변수는 job 변수보다 우선하므로, 운영값에 DB_PASSWORD/DB_NAME
+#                   같은 범용 이름을 쓰면 다른 잡까지 흘러든다. PROD_ 접두사를 유지할 것.
+#                   (be-test 는 before_script 의 export 로 자체 방어한다)
+#                ⚠️ EC2 PostgreSQL 볼륨을 처음 만들 때 쓴 값과 반드시 같아야 한다.
+#                ⚠️ "Protected" 로 두려면 main 도 protected 브랜치여야 한다.
+#                   (배포 브랜치를 develop-BE 에서 main 으로 옮겼으므로 여기도 main 기준이다)
+#   CORS_ALLOWED_ORIGINS 운영에서 API 호출을 허용할 FE 출처(origin). 콤마로 여러 개 지정 가능.
+#                예: https://vintib.example.com
+#   PROD_MINIO_ROOT_USER     운영 MinIO root 계정명. 오브젝트 스토리지는 AWS S3 가 아니라
+#   PROD_MINIO_ROOT_PASSWORD EC2 안의 MinIO 를 쓴다(팀에 AWS 계정 없음 — 계획 JY006).
+#                            백엔드의 AWS_ACCESS_KEY_ID/SECRET 도 이 값에서 파생된다.
+#                ⚠️ PROD_ 접두사 필수. be-test 잡이 MINIO_ROOT_USER/PASSWORD 를 job 변수로
+#                   쓰는데 프로젝트 변수가 job 변수를 이기므로, 접두사를 빼면 운영 자격증명이
+#                   테스트 잡의 MinIO 컨테이너까지 흘러든다.
+#                ⚠️ MinIO 볼륨을 처음 만들 때의 값으로 굳는다. 나중에 바꾸면 서명 검증이
+#                   전부 깨지고, 되돌리려면 볼륨을 지워야 한다(= 업로드 이미지 소멸).
+#                ⚠️ Masked 로 등록하려면 8자 이상이어야 한다.
+#
+#   PROD_DELIVERY_API_KEY          택배 배송 조회(deliveryapi.co.kr, SY034). 선택 변수 —
+#   PROD_DELIVERY_API_SECRET_KEY   비어 있으면 DeliveryTrackingClient가 즉시-확정 폴백으로 동작해
+#   PROD_DELIVERY_API_ENDPOINT_ID  배포가 막히지 않는다. ENDPOINT_ID/WEBHOOK_SECRET 은
+#   PROD_DELIVERY_API_WEBHOOK_SECRET POST /v1/webhooks/endpoints 를 수동으로 한 번 호출해서
+#                            받은 값이다(https://i15a108.p.ssafy.io/api/webhooks/delivery 등록).
+#
+#   PROD_TOSS_SECRET_KEY    포인트 충전 결제위젯(토스페이먼츠, SY035). 필수 변수 — 폴백이
+#   PROD_TOSS_CLIENT_KEY    없어 비어 있으면 결제 승인이 항상 실패한다. 토스 개발자센터에서
+#                           발급한 키를 등록한다(테스트 키는 사업자 등록 없이 바로 발급된다).
+#
+# 리전·버킷명·엔드포인트는 변수로 받지 않는다. MinIO 는 리전을 무시하고 버킷명도 전역
+# 유일성 제약이 없어 환경마다 다를 이유가 없어서, deploy.sh 와 compose 기본값이 정한다.
+#
+# ⚠️ 위 변수는 기본값을 두지 않는다. 잘못된 값으로 조용히 배포되는 것보다 실패가 낫다.
+#    deploy.sh 가 .env 를 만들기 전에 전부 검사해서 빠진 이름을 한 번에 출력하고 멈춘다.
+deploy:
+  stage: deploy
+  image: docker:cli
+  tags:
+    - deploy
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  variables:
+    # 커밋 SHA 로 이미지를 태깅해 롤백 시 직전 태그를 되살릴 수 있게 한다.
+    IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+    DB_NAME: vintib
+    DB_USERNAME: postgres
+  before_script:
+    # docker:cli 에 compose 플러그인·rsync 가 없을 수 있어 명시적으로 설치한다.
+    - apk add --no-cache rsync docker-cli-compose
+  script:
+    - sh infra/ci/deploy.sh
+  environment:
+    name: production
+    url: https://i15a108.p.ssafy.io

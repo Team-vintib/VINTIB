@@ -1,0 +1,11 @@
+-r requirements.txt
+
+ruff==0.15.22
+black==26.5.1
+pytest==9.1.1
+httpx==0.28.1
+requests==2.32.5
+# test/recommend/personalize/test_embed_catalog.py의 kanana-nano-embedding
+# (trust_remote_code=True) 커스텀 모델 코드가 요구하는 전이 의존성. 서빙 경로(추천 온라인
+# 조회)는 안 쓰고 오프라인 카탈로그 임베딩 파이프라인 전용이라 여기(dev)에만 추가한다.
+datasets==4.0.0

@@ -1,0 +1,803 @@
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+
+import {
+  type BackendChatMessage,
+  type BackendReaction,
+  type BackendReactionType,
+  type BackendViewerCount,
+  getLiveChatMessages,
+} from '@/domains/chat/api/liveChatApi'
+import { LIVE_REACTION_EMOJIS } from '@/domains/chat/constants/liveChatMockData'
+import { useAuthStore } from '@/domains/auth/stores/authStore'
+import { isLiveRealtimeApiEnabled, LiveRealtimeClient } from '@/domains/live/api/liveRealtimeClient'
+import AppInlineNotice from '@/shared/components/AppInlineNotice.vue'
+
+import type { LiveChatMessage, LiveReactionEmoji } from '@/domains/chat/types/liveChat.types'
+import type { LiveWatchStatus } from '@/domains/live/types/liveWatch.types'
+
+const props = defineProps<{
+  liveId: number
+  hostId: number
+  status: LiveWatchStatus
+}>()
+
+const emit = defineEmits<{
+  viewerCount: [count: number]
+  realtimeReady: [client: LiveRealtimeClient]
+}>()
+
+interface LiveReactionParticle {
+  id: number
+  emoji: LiveReactionEmoji
+  offset: number
+}
+
+const REACTION_TYPES: BackendReactionType[] = ['HEART', 'FIRE', 'CLAP', 'WOW']
+const REALTIME_ENABLED = isLiveRealtimeApiEnabled()
+
+const authStore = useAuthStore()
+const { isAuthenticated } = storeToRefs(authStore)
+const messages = ref<LiveChatMessage[]>([])
+const draft = ref('')
+const activeReaction = ref<LiveReactionEmoji | null>(null)
+const reactionParticles = ref<LiveReactionParticle[]>([])
+const messageList = ref<HTMLElement | null>(null)
+const isConnected = ref(false)
+const errorMessage = ref('')
+const isChatCollapsed = ref(false)
+let realtimeClient: LiveRealtimeClient | null = null
+let mockMessageSequence = 0
+let reactionSequence = 0
+let reactionTimer: number | null = null
+const reactionParticleTimers = new Map<number, number>()
+
+const canPublishRealtime = computed(
+  () => REALTIME_ENABLED && isConnected.value && isAuthenticated.value,
+)
+
+const composerPlaceholder = computed(() => {
+  if (props.status !== 'LIVE') return '방송 중에만 채팅할 수 있습니다'
+  if (REALTIME_ENABLED && !isAuthenticated.value) return '로그인 후 채팅할 수 있습니다'
+  if (REALTIME_ENABLED && !isConnected.value) return '채팅 연결 중...'
+  return '채팅...'
+})
+
+const canSubmitMessage = computed(
+  () => props.status === 'LIVE' && draft.value.trim().length > 0 && canPublishRealtime.value,
+)
+
+const scrollToLatestMessage = async () => {
+  await nextTick()
+
+  if (messageList.value) {
+    messageList.value.scrollTop = messageList.value.scrollHeight
+  }
+}
+
+const loadChatHistory = async () => {
+  if (!REALTIME_ENABLED) {
+    messages.value = []
+    return
+  }
+
+  try {
+    const response = await getLiveChatMessages(props.liveId)
+    messages.value = response.content
+      .slice()
+      .reverse()
+      .map((message) => mapChatMessage(message, props.hostId))
+    void scrollToLatestMessage()
+  } catch {
+    messages.value = []
+    errorMessage.value = '채팅 내역을 불러오지 못했습니다.'
+  }
+}
+
+const connectRealtime = () => {
+  disconnectRealtime()
+
+  if (!REALTIME_ENABLED || props.status !== 'LIVE') {
+    isConnected.value = false
+    return
+  }
+
+  realtimeClient = new LiveRealtimeClient({
+    onConnect: () => {
+      isConnected.value = true
+      errorMessage.value = ''
+      subscribeRealtime()
+
+      // 시청 화면(LiveWatchPage)이 이 연결에 방송 상태·현재 상품 구독을 얹을 수 있도록
+      // 연결된 클라이언트를 부모에 넘긴다(연결을 하나로 합쳐 시청자수 중복 집계 방지).
+      if (realtimeClient) {
+        emit('realtimeReady', realtimeClient)
+      }
+    },
+    onDisconnect: () => {
+      isConnected.value = false
+    },
+    onError: () => {
+      errorMessage.value = '실시간 연결을 확인해 주세요.'
+    },
+  })
+  realtimeClient.connect()
+}
+
+const subscribeRealtime = () => {
+  if (!realtimeClient) return
+
+  realtimeClient.subscribe(`/topic/lives/${props.liveId}/chat`, (body) => {
+    if (!isBackendChatMessage(body)) return
+
+    const nextMessage = mapChatMessage(body, props.hostId)
+    const existingIndex = body.clientMessageId
+      ? messages.value.findIndex((message) => message.id === body.clientMessageId)
+      : -1
+
+    if (existingIndex >= 0) {
+      messages.value.splice(existingIndex, 1, nextMessage)
+    } else {
+      messages.value.push(nextMessage)
+    }
+
+    void scrollToLatestMessage()
+  })
+
+  realtimeClient.subscribe(`/topic/lives/${props.liveId}/reactions`, (body) => {
+    if (!isBackendReaction(body)) return
+
+    const emoji = reactionEmojiOf(body.type)
+
+    if (emoji) {
+      showReactionParticle(emoji)
+    }
+  })
+
+  realtimeClient.subscribe(`/topic/lives/${props.liveId}/viewers`, (body) => {
+    if (isBackendViewerCount(body)) {
+      emit('viewerCount', body.viewerCount)
+    }
+  })
+
+  realtimeClient.subscribe('/user/queue/errors', (body) => {
+    // 반응을 너무 빠르게 눌렀을 때(L011)는 사용자에게 표시하지 않고 조용히 무시한다.
+    if (isSuppressedRealtimeError(body)) return
+    errorMessage.value = getRealtimeErrorMessage(body)
+  })
+}
+
+const disconnectRealtime = () => {
+  realtimeClient?.disconnect()
+  realtimeClient = null
+  isConnected.value = false
+}
+
+const submitMessage = () => {
+  const body = draft.value.trim()
+
+  if (!body || props.status !== 'LIVE') return
+
+  if (!REALTIME_ENABLED) {
+    mockMessageSequence += 1
+    messages.value.push({
+      id: `local-chat-${mockMessageSequence}`,
+      author: '나',
+      body,
+      role: 'VIEWER',
+    })
+    draft.value = ''
+    void scrollToLatestMessage()
+    return
+  }
+
+  if (!realtimeClient?.connected() || !isAuthenticated.value) {
+    errorMessage.value = '로그인 후 채팅할 수 있습니다.'
+    return
+  }
+
+  const clientMessageId = `local-chat-${Date.now()}-${mockMessageSequence++}`
+  messages.value.push({
+    id: clientMessageId,
+    author: authStore.user?.name || authStore.user?.email || '나',
+    body,
+    role: authStore.user?.id === props.hostId ? 'HOST' : 'VIEWER',
+  })
+  realtimeClient.publish(`/app/lives/${props.liveId}/chat`, {
+    content: body,
+    clientMessageId,
+  })
+  draft.value = ''
+  void scrollToLatestMessage()
+}
+
+const react = (emoji: LiveReactionEmoji) => {
+  if (props.status !== 'LIVE') return
+
+  if (!REALTIME_ENABLED) {
+    return
+  }
+
+  if (!realtimeClient?.connected() || !isAuthenticated.value) {
+    errorMessage.value = '로그인 후 반응할 수 있습니다.'
+    return
+  }
+
+  const reactionType = reactionTypeOf(emoji)
+
+  if (reactionType) {
+    realtimeClient.publish(`/app/lives/${props.liveId}/reactions`, {
+      type: reactionType,
+    })
+  }
+}
+
+const showReactionParticle = (emoji: LiveReactionEmoji) => {
+  activeReaction.value = emoji
+  reactionSequence += 1
+
+  const particleId = reactionSequence
+
+  reactionParticles.value.push({
+    id: particleId,
+    emoji,
+    offset: ((particleId - 1) % 3) * 18,
+  })
+
+  const particleTimer = window.setTimeout(() => {
+    reactionParticles.value = reactionParticles.value.filter(
+      (particle) => particle.id !== particleId,
+    )
+    reactionParticleTimers.delete(particleId)
+  }, 950)
+
+  reactionParticleTimers.set(particleId, particleTimer)
+
+  if (reactionTimer !== null) {
+    window.clearTimeout(reactionTimer)
+  }
+
+  reactionTimer = window.setTimeout(() => {
+    activeReaction.value = null
+    reactionTimer = null
+  }, 420)
+}
+
+watch(
+  () => [props.liveId, props.status],
+  () => {
+    errorMessage.value = ''
+    void loadChatHistory()
+    connectRealtime()
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  disconnectRealtime()
+
+  if (reactionTimer !== null) {
+    window.clearTimeout(reactionTimer)
+  }
+
+  reactionParticleTimers.forEach((timer) => {
+    window.clearTimeout(timer)
+  })
+  reactionParticleTimers.clear()
+})
+
+function mapChatMessage(message: BackendChatMessage, hostId: number): LiveChatMessage {
+  return {
+    id: String(message.messageId),
+    author: message.senderNickname || (message.senderType === 'SYSTEM' ? '시스템' : '사용자'),
+    body: message.content,
+    role: message.senderId === hostId ? 'HOST' : 'VIEWER',
+  }
+}
+
+function reactionTypeOf(emoji: LiveReactionEmoji): BackendReactionType | null {
+  const index = LIVE_REACTION_EMOJIS.indexOf(emoji)
+  return REACTION_TYPES[index] ?? null
+}
+
+function reactionEmojiOf(type: BackendReactionType): LiveReactionEmoji | null {
+  const index = REACTION_TYPES.indexOf(type)
+  return LIVE_REACTION_EMOJIS[index] ?? null
+}
+
+function isBackendChatMessage(body: unknown): body is BackendChatMessage {
+  return Boolean(
+    body &&
+    typeof body === 'object' &&
+    'messageId' in body &&
+    'content' in body &&
+    typeof (body as BackendChatMessage).content === 'string',
+  )
+}
+
+function isBackendReaction(body: unknown): body is BackendReaction {
+  return Boolean(
+    body &&
+    typeof body === 'object' &&
+    'type' in body &&
+    typeof (body as BackendReaction).type === 'string',
+  )
+}
+
+function isBackendViewerCount(body: unknown): body is BackendViewerCount {
+  return Boolean(
+    body &&
+    typeof body === 'object' &&
+    'viewerCount' in body &&
+    typeof (body as BackendViewerCount).viewerCount === 'number',
+  )
+}
+
+function getRealtimeErrorMessage(body: unknown) {
+  if (
+    body &&
+    typeof body === 'object' &&
+    'error' in body &&
+    (body as { error?: { message?: unknown } }).error?.message
+  ) {
+    return String((body as { error: { message: unknown } }).error.message)
+  }
+
+  return '메시지를 보내지 못했습니다.'
+}
+
+// 반응 속도 제한(L011)처럼 사용자에게 굳이 노출하지 않을 실시간 에러를 걸러낸다.
+function isSuppressedRealtimeError(body: unknown) {
+  if (!body || typeof body !== 'object' || !('error' in body)) return false
+
+  const error = (body as { error?: { code?: unknown; message?: unknown } }).error
+  const code = error?.code ? String(error.code) : ''
+  const message = error?.message ? String(error.message) : ''
+
+  return code === 'L011' || message.includes('반응을 너무 빠르게')
+}
+</script>
+
+<template>
+  <div class="live-chat-overlay" aria-label="라이브 채팅과 반응">
+    <div v-show="!isChatCollapsed" class="live-chat-overlay__reactions" aria-label="라이브 반응">
+      <button
+        v-for="emoji in LIVE_REACTION_EMOJIS"
+        :key="emoji"
+        type="button"
+        :class="{ 'live-chat-overlay__reaction--active': activeReaction === emoji }"
+        :disabled="status !== 'LIVE'"
+        :aria-label="`${emoji} 반응 보내기`"
+        @click="react(emoji)"
+      >
+        {{ emoji }}
+      </button>
+    </div>
+
+    <div
+      class="live-chat-overlay__reaction-burst"
+      :class="{ 'live-chat-overlay__reaction-burst--collapsed': isChatCollapsed }"
+      aria-hidden="true"
+    >
+      <span
+        v-for="particle in reactionParticles"
+        :key="particle.id"
+        :style="{ left: `${particle.offset}px` }"
+      >
+        {{ particle.emoji }}
+      </span>
+    </div>
+
+    <section v-show="!isChatCollapsed" class="live-chat-overlay__panel" aria-label="라이브 채팅">
+      <button
+        type="button"
+        class="live-chat-overlay__close"
+        aria-label="채팅 창 줄이기"
+        title="채팅 창 줄이기"
+        @click="isChatCollapsed = true"
+      >
+        ×
+      </button>
+      <ul ref="messageList" class="live-chat-overlay__messages" aria-live="polite">
+        <li v-for="message in messages" :key="message.id">
+          <!-- 아이디는 누구든 같은 서체·크기·굵기·색으로 그린다(판매자 강조 없음). -->
+          <span class="live-chat-overlay__author">{{ message.author }}</span>
+          <span class="live-chat-overlay__message">{{ message.body }}</span>
+        </li>
+      </ul>
+
+      <AppInlineNotice v-if="errorMessage" class="live-chat-overlay__notice" variant="info">
+        {{ errorMessage }}
+      </AppInlineNotice>
+
+      <form class="live-chat-overlay__composer" @submit.prevent="submitMessage">
+        <input
+          v-model="draft"
+          type="text"
+          maxlength="200"
+          :disabled="status !== 'LIVE' || (REALTIME_ENABLED && !canPublishRealtime)"
+          :placeholder="composerPlaceholder"
+          aria-label="채팅 메시지"
+        />
+        <button type="submit" :disabled="!canSubmitMessage" aria-label="채팅 보내기">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m22 2-7 20-4-9-9-4 20-7Z" />
+            <path d="M22 2 11 13" />
+          </svg>
+        </button>
+      </form>
+    </section>
+
+    <div v-show="isChatCollapsed" class="live-chat-overlay__collapsed" aria-label="라이브 반응">
+      <button
+        v-for="emoji in LIVE_REACTION_EMOJIS"
+        :key="`collapsed-${emoji}`"
+        type="button"
+        :class="{ 'live-chat-overlay__reaction--active': activeReaction === emoji }"
+        :disabled="status !== 'LIVE'"
+        :aria-label="`${emoji} 반응 보내기`"
+        @click="react(emoji)"
+      >
+        {{ emoji }}
+      </button>
+      <button
+        type="button"
+        class="live-chat-overlay__reopen"
+        aria-label="채팅 창 다시 열기"
+        @click="isChatCollapsed = false"
+      >
+        채팅
+      </button>
+    </div>
+  </div>
+</template>
+
+<style scoped lang="scss">
+.live-chat-overlay {
+  position: absolute;
+  z-index: var(--z-layer-1);
+  inset: 0;
+  pointer-events: none;
+}
+
+.live-chat-overlay__close {
+  display: grid;
+  position: absolute;
+  z-index: var(--z-layer-2);
+  top: 8px;
+  right: 8px;
+  width: var(--badge-height-lg);
+  height: var(--badge-height-lg);
+  border: 0;
+  border-radius: 50%;
+  background: rgba(8, 8, 8, 0.7);
+  color: var(--color-live-text-primary);
+  font-size: var(--font-size-lg);
+  line-height: 1;
+  pointer-events: auto;
+  place-items: center;
+  backdrop-filter: blur(8px);
+}
+
+/* 채팅 창을 줄인 상태: 감정 이모지와 다시 열기 버튼을 가로로 배치한다. */
+.live-chat-overlay__collapsed {
+  display: flex;
+  position: absolute;
+  bottom: 12px;
+  left: 20px;
+  align-items: center;
+  gap: var(--space-2);
+  pointer-events: auto;
+}
+
+.live-chat-overlay__collapsed button:not(.live-chat-overlay__reopen) {
+  width: 24px;
+  height: var(--badge-height-sm);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-live-text-primary);
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-lg);
+}
+
+.live-chat-overlay__collapsed button:not(.live-chat-overlay__reopen):disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.live-chat-overlay__reopen {
+  min-height: var(--badge-height-lg);
+  margin-left: var(--space-1);
+  padding: 0 12px;
+  border: 1px solid var(--color-live-border);
+  border-radius: var(--radius-badge);
+  background: rgba(8, 8, 8, 0.7);
+  color: var(--color-live-text-primary);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-medium);
+  backdrop-filter: blur(8px);
+}
+
+.live-chat-overlay__close:focus-visible,
+.live-chat-overlay__reopen:focus-visible,
+.live-chat-overlay__collapsed button:focus-visible {
+  outline: 2px solid var(--color-primary-strong);
+  outline-offset: 2px;
+}
+
+.live-chat-overlay__reactions {
+  display: flex;
+  position: absolute;
+  bottom: 12px;
+  left: 432px;
+  flex-direction: column;
+  gap: var(--space-2);
+  pointer-events: auto;
+}
+
+.live-chat-overlay__reactions button {
+  width: 24px;
+  height: var(--badge-height-sm);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-live-text-primary);
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-lg);
+  transition:
+    background-color 150ms ease,
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+
+.live-chat-overlay__reactions button:hover:not(:disabled) {
+  transform: scale(1.16);
+}
+
+.live-chat-overlay__reaction--active {
+  border-radius: var(--radius-badge);
+  background: rgba(242, 240, 237, 0.14) !important;
+  transform: scale(0.84) !important;
+}
+
+.live-chat-overlay__reactions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.live-chat-overlay__reactions button:focus-visible,
+.live-chat-overlay__composer button:focus-visible,
+.live-chat-overlay__composer input:focus-visible {
+  outline: 2px solid var(--color-primary-strong);
+  outline-offset: 2px;
+}
+
+.live-chat-overlay__reaction-burst {
+  position: absolute;
+  bottom: 12px;
+  left: 432px;
+  width: 76px;
+  height: 156px;
+  pointer-events: none;
+}
+
+/* 채팅 꺼짐: 가로 반응 바(좌하단)에서 버스트가 올라오도록 위치를 맞춘다 */
+.live-chat-overlay__reaction-burst--collapsed {
+  left: 20px;
+}
+
+.live-chat-overlay__reaction-burst span {
+  position: absolute;
+  bottom: 0;
+  font-size: var(--font-size-2xl);
+  line-height: 28px;
+  opacity: 0;
+  filter: drop-shadow(0 5px 7px rgba(0, 0, 0, 0.45));
+  animation: live-reaction-float 900ms ease-out forwards;
+  will-change: opacity, transform;
+}
+
+/* 채팅은 라이브에서 가장 자주 읽는 영역이라 창·글씨를 키워 잡았다. 폭을 바꾸면 아래
+   `__reactions`·`__reaction-burst`의 left(= 20 + 폭 + 12)도 같이 맞춰야 이모지 열이
+   패널 오른쪽에 붙는다. */
+.live-chat-overlay__panel {
+  position: absolute;
+  bottom: 12px;
+  left: 20px;
+  width: 400px;
+  padding: 16px;
+  border: 1px solid var(--overlay-hairline);
+  border-radius: var(--radius-control);
+  background: rgba(8, 8, 8, 0.68);
+  backdrop-filter: blur(12px);
+  pointer-events: auto;
+}
+
+.live-chat-overlay__messages {
+  height: 220px;
+  margin: 0 0 var(--space-2);
+  overflow-y: auto;
+  padding: 0 6px 0 0;
+  list-style: none;
+  scrollbar-color: var(--overlay-scrollbar) transparent;
+  scrollbar-width: thin;
+}
+
+.live-chat-overlay__messages::-webkit-scrollbar {
+  width: 4px;
+}
+
+.live-chat-overlay__messages::-webkit-scrollbar-thumb {
+  background: var(--overlay-scrollbar);
+}
+
+.live-chat-overlay__messages li {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.live-chat-overlay__messages li + li {
+  margin-top: 9px;
+}
+
+/* 아이디는 본문과 같은 서체를 쓰고, 누구의 아이디든 완전히 같게 그린다 — 모노
+   (IBM Plex Mono)에는 한글 글리프가 없어 한글 닉네임이 대체 폰트로 떨어지며 본문과
+   서체가 달라 보였다. 자간·대문자 변환도 한글에는 효과가 없어 함께 걷어냈다. */
+.live-chat-overlay__author {
+  flex: 0 0 auto;
+  color: var(--color-live-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  line-height: 1.5;
+}
+
+.live-chat-overlay__message {
+  color: #d8d4d0;
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-regular);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 연결·전송 오류 안내는 채팅창 안 배너로 띄운다(공용 AppInlineNotice 규격). */
+.live-chat-overlay__notice {
+  margin: 0 0 6px;
+}
+
+.live-chat-overlay__composer {
+  display: flex;
+  width: 100%;
+  box-sizing: border-box;
+  align-items: center;
+  padding: 4px 0 0;
+  border-top: 1px solid var(--overlay-hairline);
+  gap: 6px;
+}
+
+.live-chat-overlay__composer input {
+  min-width: 0;
+  padding: 9px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-live-text-primary);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-snug);
+  flex: 1;
+}
+
+.live-chat-overlay__composer input::placeholder {
+  color: var(--color-live-text-secondary);
+}
+
+.live-chat-overlay__composer button {
+  display: grid;
+  flex: 0 0 auto;
+  width: 26px;
+  height: var(--badge-height-sm);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-live-text-primary);
+  place-items: center;
+}
+
+.live-chat-overlay__composer button:disabled {
+  cursor: not-allowed;
+  color: var(--color-live-text-secondary);
+  opacity: 0.5;
+}
+
+.live-chat-overlay__composer svg {
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+@media (max-width: 720px) {
+  .live-chat-overlay__reactions {
+    top: 12px;
+    bottom: auto;
+    left: 15px;
+    flex-direction: row;
+  }
+
+  .live-chat-overlay__panel {
+    width: min(340px, calc(100% - 88px));
+  }
+
+  .live-chat-overlay__messages {
+    height: 180px;
+  }
+
+  .live-chat-overlay__reaction-burst {
+    top: 45px;
+    bottom: auto;
+    left: 15px;
+    width: 180px;
+    height: var(--button-height-tight);
+  }
+
+  .live-chat-overlay__reaction-burst span {
+    top: 0;
+    bottom: auto;
+    animation-name: live-reaction-float-side;
+  }
+
+  .live-chat-overlay__composer {
+    width: 100%;
+  }
+}
+
+@keyframes live-reaction-float {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.7) rotate(-8deg);
+  }
+
+  18% {
+    opacity: 1;
+    transform: translateY(0) scale(1.08) rotate(4deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-132px) scale(1.34) rotate(12deg);
+  }
+}
+
+@keyframes live-reaction-float-side {
+  0% {
+    opacity: 0;
+    transform: translate(0, 4px) scale(0.7);
+  }
+
+  18% {
+    opacity: 1;
+    transform: translate(8px, 0) scale(1.05);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(128px, -6px) scale(1.2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-chat-overlay__reactions button {
+    transition: none;
+  }
+
+  .live-chat-overlay__reaction-burst span {
+    animation-duration: 1ms;
+  }
+}
+</style>

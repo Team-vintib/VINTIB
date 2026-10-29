@@ -1,0 +1,115 @@
+package com.ssafy.backend.tryon.controller;
+
+import com.ssafy.backend.global.exception.CustomException;
+import com.ssafy.backend.global.exception.ErrorCode;
+import com.ssafy.backend.global.response.ApiResponse;
+import com.ssafy.backend.tryon.dto.response.TryOnResultResponse;
+import com.ssafy.backend.tryon.service.TryOnResultService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import java.util.List;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+// 경로는 APIs.md의 `/users/{id}/tryons` 스펙을 그대로 따른다(userId/id 두 path variable을
+// 구분해야 해서 바깥쪽을 {userId}로 표기 — 같은 문서의 /users/{userId}/wishes/{id}와 동일한 표기 관례).
+@Tag(name = "AI 가상 시착(TryOns)", description = "시착 결과 조회/삭제 API")
+@RestController
+@RequestMapping("/api/users/{userId}/tryons")
+@RequiredArgsConstructor
+public class TryOnController {
+
+    private final TryOnResultService tryOnResultService;
+
+    @Operation(
+            summary = "시착 생성",
+            description = "상품 사진 + 본인 시착 프로필 사진으로 AI 시착 job을 접수한다(비동기). "
+                    + "완료 여부는 상세 조회(GET /{id})로 폴링해서 확인한다. "
+                    + "시착 프로필 사진이 등록돼 있지 않으면 실패한다.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "201", description = "접수 성공(status=PENDING)"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "시착 프로필 사진 미등록 또는 상품 대표 이미지 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "인증 필요"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403", description = "본인 외 사용자로 요청"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503", description = "AI 서버 호출 실패")
+    })
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping
+    public ResponseEntity<ApiResponse<TryOnResultResponse>> createResult(
+            Authentication authentication, @PathVariable Long userId, @RequestParam Long productId) {
+        requireSelf(authentication, userId);
+        TryOnResultResponse response = tryOnResultService.createResult(userId, productId);
+        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.success(response));
+    }
+
+    @Operation(
+            summary = "시착 결과 목록 조회",
+            description = "본인의 시착 결과 목록을 최신순으로 조회한다. 각 항목의 이미지 URL은 짧은 만료시간의 presigned GET URL이다. "
+                    + "결과 상품의 대분류 카테고리(categoryId/categoryName, 상의/하의/아우터/원피스/신발/가방/액세서리 등)도 함께 낸다 — "
+                    + "카테고리를 못 찾으면 둘 다 null.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "조회 성공"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "인증 필요"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403", description = "본인 외 사용자의 시착 결과를 조회하려 함")
+    })
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping
+    public ResponseEntity<ApiResponse<List<TryOnResultResponse>>> getResults(
+            Authentication authentication, @PathVariable Long userId) {
+        requireSelf(authentication, userId);
+        return ResponseEntity.ok(ApiResponse.success(tryOnResultService.getResults(userId)));
+    }
+
+    @Operation(
+            summary = "시착 결과 상세 조회",
+            description = "본인의 시착 결과 하나를 조회한다. 목록 조회와 동일하게 결과 상품의 대분류 카테고리"
+                    + "(categoryId/categoryName)를 함께 낸다.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "조회 성공"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "인증 필요"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403", description = "본인의 시착 결과가 아님"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "시착 결과 없음")
+    })
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/{id}")
+    public ResponseEntity<ApiResponse<TryOnResultResponse>> getResult(
+            Authentication authentication, @PathVariable Long userId, @PathVariable Long id) {
+        requireSelf(authentication, userId);
+        return ResponseEntity.ok(ApiResponse.success(tryOnResultService.getResult(userId, id)));
+    }
+
+    @Operation(summary = "시착 결과 삭제", description = "본인의 시착 결과를 S3와 DB에서 함께 삭제한다.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "204", description = "삭제 성공"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "인증 필요"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403", description = "본인의 시착 결과가 아님"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "시착 결과 없음")
+    })
+    @SecurityRequirement(name = "bearerAuth")
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteResult(
+            Authentication authentication, @PathVariable Long userId, @PathVariable Long id) {
+        requireSelf(authentication, userId);
+        tryOnResultService.deleteResult(userId, id);
+        return ResponseEntity.noContent().build();
+    }
+
+    // path의 userId가 인증된 본인이 아니면 존재 자체를 드러내지 않고 403으로 막는다(IDOR 방지).
+    private void requireSelf(Authentication authentication, Long userId) {
+        Long memberId = (Long) authentication.getPrincipal();
+        if (!memberId.equals(userId)) {
+            throw new CustomException(ErrorCode.TRYON_RESULT_NOT_OWNER);
+        }
+    }
+}

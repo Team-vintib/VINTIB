@@ -1,0 +1,114 @@
+# 리버스 프록시 + TLS 종단 (S15P11A108-297)
+#
+# Caddy 가 i15a108.p.ssafy.io 에 대해 Let's Encrypt 인증서를 자동 발급·갱신하고,
+# HTTP(80)→HTTPS(443) 리다이렉트한 뒤 백엔드 컨테이너로 프록시한다.
+# backend 는 호스트에 포트를 열지 않고 vintib-net 내부에서 backend:8080 으로만 접근한다.
+#
+# /ai/* 는 AI 게이트웨이(ai:8000)로 라우팅한다.
+# 워커(로컬 노트북)는 Redis에 직접 붙지 않고 이 경로로만 job을 주고받는다.
+#
+# WebRTC 시그널링(OpenVidu v3 = LiveKit)은 아래 /rtc·/twirp 로 프록시한다 (S15P11A108-448).
+# 미디어는 여기를 타지 않는다 — 브라우저와 미디어 서버가 포트 80 으로 직접 주고받는다(JY012).
+
+# ── 전역 옵션 ────────────────────────────────────────────────────────────────
+#
+# ⚠️ 80 을 쓰지 않는다. 그 포트는 LiveKit 미디어 TCP 가 가져갔다(JY012) — SSAFY 상위
+#    방화벽이 TCP 22·80·443·8989 만 통과시켜 미디어에 내줄 포트가 80 밖에 없었다.
+#
+# disable_redirects 가 없으면 Caddy 가 http→https 리다이렉트용으로 :80 을 잡으려 하고,
+# 이미 LiveKit 이 쓰고 있어 기동이 충돌한다. 대가로 주소창에 http:// 를 직접 친 사용자는
+# 자동으로 넘어가지 못한다 — 링크는 전부 https 라 실사용에는 영향이 적다.
+{
+	auto_https disable_redirects
+}
+
+i15a108.p.ssafy.io {
+	encode zstd gzip
+
+	# ⚠️ ACME 챌린지를 TLS-ALPN-01(443)로 고정한다.
+	#
+	# 기본값은 HTTP-01 을 먼저 시도하는데 그건 :80 을 요구한다. 지금 80 은 LiveKit 이
+	# 쓰므로 챌린지가 실패한다. **인증서가 이미 발급돼 있어 당장은 멀쩡해 보이지만**,
+	# 만료 30일 전 갱신 시점에 조용히 실패하고 그대로 두면 인증서가 만료돼 사이트가
+	# 통째로 죽는다. 그래서 지금 명시적으로 끈다.
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+
+	# ── WebRTC 시그널링 (LiveKit) ────────────────────────────────────────────
+	#
+	# 서브도메인을 쓸 수 없어(SSAFY 가 호스트 하나만 준다) 같은 도메인의 경로로 나눈다.
+	# LiveKit 클라이언트는 wss://i15a108.p.ssafy.io 로 접속하고 내부적으로 /rtc 를 연다.
+	#
+	# ⚠️ encode 대상에서 빼야 한다. WebSocket 업그레이드 요청에 압축을 걸면 프레임이 깨진다.
+	#    Caddy 는 업그레이드 요청을 자동으로 통과시키지만, 명시적으로 앞에 두어 순서를 고정한다.
+	@livekit path /rtc /rtc/* /twirp/*
+	handle @livekit {
+		reverse_proxy livekit:7880
+	}
+
+	# ── 백엔드가 맡는 경로 (S15P11A108-27, FE 배포 대비) ──────────────────────
+	#
+	# 지금은 아래 catch-all 도 backend 라 이 블록이 없어도 결과가 같다. 그런데도 미리 명시하는
+	# 이유는, **FE 컨테이너가 들어오면 catch-all 이 frontend 로 바뀌기 때문**이다. 그때 이 규칙이
+	# 없으면 API·WebSocket 이 통째로 FE 정적 서버로 가서 전부 404 가 된다.
+	#
+	# ⚠️ 백엔드는 /api 밖에서도 서비스한다. /api/* 만 적으면 아래 셋이 조용히 죽는다.
+	#    - /ws        STOMP 핸드셰이크 (채팅·시청자수·반응 전부 여기 얹혀 있다)
+	#    - /actuator  헬스체크
+	#    - /swagger-ui, /v3/api-docs   API 문서 (팀 전체가 쓴다)
+	#    SecurityConfig 의 PUBLIC_ENDPOINTS 와 같은 목록이므로 한쪽만 고치지 말 것.
+	@backend path /api/* /ws /ws/* /actuator/* /swagger-ui/* /swagger-ui.html /v3/api-docs /v3/api-docs/*
+	handle @backend {
+		reverse_proxy backend:8080
+	}
+
+	# AI 게이트웨이 (워커 poll/result, job 접수/조회)
+	handle /ai/* {
+		reverse_proxy ai:8000
+	}
+
+	handle /results/* {
+		reverse_proxy ai:8000
+	}
+
+	# 등록 AI 착용컷용 고정 모델 참조 사진(app/main.py가 StaticFiles로 마운트).
+	# 이 규칙이 없으면 catch-all(frontend)로 새서 index.html이 대신 응답된다 —
+	# 그 결과 워커의 download_image()가 "cannot identify image file"로 매번(100%)
+	# 실패했다(재시도로 못 고치는 이유: 네트워크 문제가 아니라 라우팅 누락이라 매번
+	# 똑같이 실패함, S15P11A108-568 관련 실측).
+	handle /personas/* {
+		reverse_proxy ai:8000
+	}
+
+	# 오브젝트 스토리지(MinIO). 팀에 AWS 계정이 없어 운영도 자체 호스팅한다 — 계획 JY006.
+	#
+	# 백엔드가 endpoint override 를 쓰면 SDK 가 path-style 을 강제하므로 URL 이
+	# https://i15a108.p.ssafy.io/{bucket}/{key} 형태가 된다. 그래서 버킷명을 그대로
+	# 최상위 경로로 받는다 (현재 API 는 전부 /api/* 라 충돌하지 않는다).
+	#
+	# ⚠️ handle_path 를 쓰면 안 된다. 경로 접두사를 잘라내면 SigV4 서명 대상이 달라져
+	#    presigned URL 검증이 전부 실패한다. handle 로 경로를 그대로 넘긴다.
+	# ⚠️ 서명에는 Host 도 포함된다. Caddy 는 reverse_proxy 시 원본 Host 를 보존하므로
+	#    MinIO 가 백엔드의 presigner 와 동일한 값으로 검증한다 — 여기서 Host 를 바꾸지 말 것.
+	handle /vintib-public/* {
+		reverse_proxy minio:9000
+	}
+	handle /vintib-private/* {
+		reverse_proxy minio:9000
+	}
+
+	# catch-all — 위 @backend·@livekit·/ai·/results·/vintib-* 에 안 걸린 나머지는
+	# 전부 FE(정적 서버)로 보낸다. (S15P11A108-27, FE 배포)
+	handle {
+		reverse_proxy frontend:80
+	}
+
+	# 접근 로그 (컨테이너 stdout → docker logs)
+	log {
+		output stdout
+		format console
+	}
+}

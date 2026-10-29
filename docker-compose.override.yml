@@ -1,0 +1,59 @@
+# 로컬 개발 전용 — `docker compose up -d` 시 자동 병합된다.
+#
+# 여기서만 호스트 포트를 연다. IDE에서 DB 클라이언트를 붙이거나
+# Spring 을 컨테이너 밖(로컬 JVM)에서 띄워 붙일 수 있게 하기 위함이다.
+#
+# ⚠️ EC2 에서는 이 파일이 병합되면 안 된다.
+#    운영 기동은 반드시 아래 형태로 -f 를 명시한다.
+#    docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    ports:
+      - "${DB_PORT:-5432}:5432"
+
+  postgres-vector:
+    ports:
+      - "${VECTOR_DB_PORT:-5433}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+
+  backend:
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      # presigned URL은 브라우저/FE가 여는 것이라 호스트에 발행된 포트를 가리켜야 한다.
+      # (컨테이너 네트워크 주소인 base 의 AWS_S3_ENDPOINT 로는 브라우저가 열지 못한다)
+      AWS_S3_PUBLIC_ENDPOINT: http://localhost:${MINIO_API_PORT:-9000}
+
+  ai:
+    ports:
+      - "${AI_PORT:-8000}:8000"
+    environment:
+      # base(docker-compose.yml)엔 운영 도메인이 리터럴로 박혀 있다. 로컬에서 이 값을
+      # 그대로 쓰면 AI가 자체 호스팅하는 URL(/personas/*, /results/*)이 아직 존재하지
+      # 않는 운영 경로를 가리켜서, 워커가 내려받다가 이미지가 아닌 응답을 받는다
+      # ("cannot identify image file"). 워커도 로컬 게이트웨이(GATEWAY_URL=http://
+      # localhost:8000/ai)를 보게 되므로, 여기서 만든 URL도 같은 호스트를 가리켜야 한다.
+      PUBLIC_BASE_URL: http://localhost:${AI_PORT:-8000}
+
+  # 로컬에서는 Caddy 가 없으므로 시그널링(7880)도 호스트에 연다.
+  # 브라우저가 ws://localhost:7880 으로 직접 붙는다.
+  livekit:
+    ports:
+      - "${LIVEKIT_PORT:-7880}:7880"
+      - "7885:7885/udp"
+      # 미디어 TCP 폴백. 운영이 상위 방화벽 때문에 80 을 쓰게 되면서(JY012) 설정 파일의
+      # tcp_port 가 80 이 됐고, 로컬도 같은 값으로 맞춘다 — 설정을 한 벌만 유지하기 위해서다.
+      # 로컬에서 80 이 이미 쓰이면 LIVEKIT_TCP_PORT 로 호스트 쪽만 바꿔 띄우면 된다.
+      - "${LIVEKIT_TCP_PORT:-80}:80"
+
+  # minio 서비스 자체는 base 에 있다 (운영도 MinIO 를 쓴다 — 계획 JY006).
+  # 여기서는 IDE에서 직접 붙거나 콘솔을 열 수 있게 호스트 포트만 추가로 발행한다.
+  minio:
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"

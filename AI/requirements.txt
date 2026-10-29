@@ -1,0 +1,27 @@
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+redis==5.0.8
+python-multipart==0.0.12
+aiofiles==24.1.0
+numpy==1.26.4
+# AI 전용 벡터 저장소(postgres-vector, S15P11A108-375) 접속용 — 의류 임베딩·가격 관측 로그·
+# attention map 로그(app/core/db.py). 저장할 임베딩은 워커가 계산해 넘기므로 DB 왕복에는
+# 드라이버만 있으면 된다.
+sqlalchemy==2.0.44
+psycopg[binary]==3.2.4
+pgvector==0.5.0
+# 품질 검수 Attention Map 오버레이 생성 + 목업 베이스 이미지 합성(app/quality/).
+# matplotlib은 서빙 경로에 넣지 않는다 — 히트맵은 Pillow만으로 그린다.
+Pillow==11.3.0
+# 가격 책정(app/pricing/)의 시세 검색(Gemini generateContent)·신상품가 조회(네이버 쇼핑)에
+# 쓰는 HTTP 클라이언트. torch가 아니라 순수 HTTP라 서빙 경로에 둬도 되는 경량 의존성이다.
+# app/pricing/gms.py·retail.py가 직접 import한다 — requirements-dev.txt와 같은 버전으로 고정.
+httpx==0.28.1
+# 가격 책정 internal_clip comps 백엔드(app/pricing/clip_embed.py)와 오프라인 카탈로그 임베딩
+# 파이프라인(app/recommend/pipeline/embed_catalog.py)이 함수 안에서 지연 import한다 — 그 경로를
+# 타지 않으면 로드되지 않는다. 컨테이너엔 GPU가 없으므로 CPU 전용 torch wheel을 쓴다.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.7.1
+transformers==4.51.3

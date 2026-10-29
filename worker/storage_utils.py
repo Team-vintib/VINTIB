@@ -1,0 +1,62 @@
+"""
+게이트웨이 업로드/다운로드 HTTP 유틸.
+
+워커(노트북)는 자기 디스크에 결과를 직접 쓰지 않는다 — 외부에서 접근 불가능하기 때문이다.
+대신 게이트웨이의 `/workers/upload-image`로 전송하면 EC2 디스크에 저장되고 공개 URL이
+돌아온다(S3 권한이 없어 대체한 경로, AI/docs/infra-architecture.md §3.5).
+
+`base_worker.py`와 달리 클래스가 아니라 함수형이다 — 각 워커의 `run_inference()`에서
+바로 호출해 쓰는 짧은 유틸이라 상태를 가질 필요가 없다.
+"""
+
+import io
+import os
+import time
+
+import requests
+from PIL import Image
+
+_GATEWAY_URL = os.getenv("GATEWAY_URL", "").rstrip("/")
+_API_KEY = os.getenv("WORKER_API_KEY")
+
+
+def _headers() -> dict[str, str]:
+    return {"X-API-Key": _API_KEY} if _API_KEY else {}
+
+
+def download_image(url: str, timeout: float = 30.0, retries: int = 3, retry_delay: float = 2.0) -> Image.Image:
+    """상품/사용자 이미지 URL을 내려받는다.
+
+    최대 `retries`회, `retry_delay`초 간격으로 재시도한다. 등록 AI 착용컷·시착 워커 둘 다
+    "cannot identify image file"(순간적 네트워크 오류 또는 방금 올라간 이미지의 전파 지연
+    추정)로 가끔/자주 실패하는 걸 실측으로 확인했다 — 둘 다 이 함수를 공용으로 쓰므로
+    여기서 한 번만 고치면 된다. `PIL.UnidentifiedImageError`는 `OSError`의 서브클래스다.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content))
+        except (requests.RequestException, OSError) as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(retry_delay)
+    raise last_error
+
+
+def upload_image(image: Image.Image, prefix: str, timeout: float = 30.0) -> str:
+    """결과 이미지를 PNG로 인코딩해 게이트웨이에 올리고 공개 URL을 받는다."""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+
+    resp = requests.post(
+        f"{_GATEWAY_URL}/workers/upload-image",
+        params={"prefix": prefix},
+        files={"file": ("result.png", buffer, "image/png")},
+        headers=_headers(),
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()["url"]
