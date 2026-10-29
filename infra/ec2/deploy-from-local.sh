@@ -8,7 +8,7 @@
 # CI 배포(infra/ci/deploy.sh)와 같은 순서를 따른다: 코드 동기화 → 빌드 → 기동 → Caddy 반영 확인
 # → 헬스체크 → 실패 시 직전 태그 롤백. 다른 점은 두 가지다.
 #   1) .env 를 만들지 않는다. 서버에 init-env.sh 로 한 번 만들어 둔 것을 그대로 쓰고 IMAGE_TAG 만 바꾼다.
-#   2) 저장소 전체가 아니라 git archive 로 **커밋된 내용만**, AI/validation·worker 를 빼고 보낸다
+#   2) 저장소 전체가 아니라 git archive 로 **커밋된 내용만**, AI/validation·AI/worker 를 빼고 보낸다
 #      (추적 파일 ~490MB → ~12MB). 작업 트리의 커밋 안 된 변경은 배포되지 않는다.
 #
 # 배포 소요 시간(빌드·교체·헬스)을 마지막에 출력한다 — 베이스라인 지표 "배포 소요 / 다운타임"의 원천이다.
@@ -35,7 +35,7 @@ echo "[deploy] $REF($TAG) 압축"
 # ⚠️ core.autocrlf=false 를 강제한다. Windows 기본값(true)이면 git archive 가 Dockerfile·yml 등을
 #    CRLF 로 내보내고, 리눅스에서 \r 이 붙은 명령이 조용히 깨진다(.gitattributes 는 *.sh 만 LF 고정).
 git -c core.autocrlf=false archive --format=tar.gz -o "$work/src.tgz" "$REF" -- . \
-    ':(exclude)AI/validation' ':(exclude)worker'
+    ':(exclude)AI/validation' ':(exclude)AI/worker'
 ls -la "$work/src.tgz" | awk '{print "[deploy] 크기 " $5 " bytes"}'
 
 echo "[deploy] 업로드 → $HOST"

@@ -1,4 +1,4 @@
-// AI 품질 검수(`worker/models/sam3/prompts.py`의 SECTION_LABELS_KO)와 정확히 같은 한글
+// AI 품질 검수(`AI/worker/models/sam3/prompts.py`의 SECTION_LABELS_KO)와 정확히 같은 한글
 // 라벨이다 — 새 라벨을 만들지 않고 AI 쪽 표기를 그대로 옮긴다. 부위가 늘어나면(예: 원피스
 // 지원 추가) 이 상수도 함께 갱신해야 한다.
 export const AI_SECTION_LABELS: Record<string, string> = {

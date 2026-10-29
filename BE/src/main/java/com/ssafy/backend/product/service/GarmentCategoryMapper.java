@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * BE 카테고리(leaf, {@link Category#getNameEn()}) → AI SAM3/가격책정 공용
- * {@code GarmentCategory}(6종, {@code worker/models/sam3/contracts.py}) 매핑.
+ * {@code GarmentCategory}(6종, {@code AI/worker/models/sam3/contracts.py}) 매핑.
  *
  * <p>하자 검수({@code ProductImageService})와 가격 추천 트리거({@code PriceEstimateService})
  * 가 같은 매핑을 공유한다 — 둘 다 AI 쪽 같은 6종 enum을 받는다.

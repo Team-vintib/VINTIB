@@ -57,9 +57,9 @@
 
 | 항목 | 스크립트/설정 |
 | --- | --- |
-| swap 4GB (swappiness=10, fstab 등록) | [`infra/ec2/setup-swap.sh`](../../../infra/ec2/setup-swap.sh) |
-| UFW 80/tcp 추가 (기존 규칙 보존) | [`infra/ec2/setup-ufw.sh`](../../../infra/ec2/setup-ufw.sh) |
-| Caddy 리버스 프록시 + Let's Encrypt TLS | [`infra/caddy/Caddyfile`](../../../infra/caddy/Caddyfile), `docker-compose.prod.yml` |
+| swap 4GB (swappiness=10, fstab 등록) | [`infra/ec2/setup-swap.sh`](../ec2/setup-swap.sh) |
+| UFW 80/tcp 추가 (기존 규칙 보존) | [`infra/ec2/setup-ufw.sh`](../ec2/setup-ufw.sh) |
+| Caddy 리버스 프록시 + Let's Encrypt TLS | [`infra/caddy/Caddyfile`](../caddy/Caddyfile), `docker-compose.prod.yml` |
 | 앱 컨테이너 5종 기동 | `docker-compose.prod.yml` |
 
 ## 기동·재현 절차

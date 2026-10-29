@@ -1,15 +1,14 @@
 """AI 테스트 전역 설정.
 
 **`worker/`·`worker/models/clipseg/`·`worker/models/garment_measurement/`·
-`worker/models/sam3/`·`worker/models/catvton/`을 import 경로에 넣는다.** 리포 루트의
-`worker/`는 별도 CI 잡이 없어(`.gitlab-ci.yml`의 `ai-test`는 `AI/**/*`만 감시한다) 그냥
-두면 lint·test가 전혀 돌지 않는다. 품질검수·실측·시착 판정 로직이 그쪽에 있으므로,
-**순수 로직만이라도 AI의 pytest로 커버**한다(torch가 필요한 백엔드는 목업으로 우회되거나
+`worker/models/sam3/`·`worker/models/catvton/`을 import 경로에 넣는다.** `worker/`는 팀원
+노트북에서 도는 추론 코드라 lint 대상이 아니다(`pyproject.toml`에서 제외). 품질검수·실측·시착
+판정 로직이 그쪽에 있으므로, **순수 로직만이라도 AI의 pytest로 커버**한다(torch가 필요한 백엔드는 목업으로 우회되거나
 애초에 import하지 않으므로 CI에서 그대로 돈다).
 
 해당 테스트는 `test/worker/`·`test/worker/clipseg/`·`test/worker/garment_measurement/`·
 `test/worker/sam3/`·`test/worker/catvton/`에 있다 — `test/`가 `app/<도메인>/`을 미러한다는
-규칙의 예외이며, 리포 루트 `worker/`를 대상으로 한다는 뜻이다.
+규칙의 예외이며, `app/`이 아니라 `worker/`를 대상으로 한다는 뜻이다.
 
 **경로마다 넣는 방식이 다르다.**
 
@@ -36,8 +35,8 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_WORKER_ROOT_PATH = _REPO_ROOT / "worker"  # inspection_logger.py 등 flat 모듈
+_AI_ROOT = Path(__file__).resolve().parent.parent
+_WORKER_ROOT_PATH = _AI_ROOT / "worker"  # inspection_logger.py 등 flat 모듈
 _CLIPSEG_PATH = _WORKER_ROOT_PATH / "models" / "clipseg"
 _WORKER_MODELS_PATH = _WORKER_ROOT_PATH / "models"  # garment_measurement/sam3 등 패키지의 부모
 _CATVTON_PATH = _WORKER_ROOT_PATH / "models" / "catvton"  # model. 네임스페이스의 부모

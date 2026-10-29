@@ -1,6 +1,6 @@
 import { PRODUCT_REGISTRATION_COLOR_OPTIONS } from '@/domains/product/constants/productRegistrationOptions'
 
-// AI 색상 분류기(`worker/models/product_classifier/color.py`)의 팔레트(13색 + MIXED)는
+// AI 색상 분류기(`AI/worker/models/product_classifier/color.py`)의 팔레트(13색 + MIXED)는
 // 등록 폼의 14개 색상 옵션과 1:1로 정확히 매핑된다(값을 소문자로 낮추기만 하면 id가 같다) —
 // 실제로 요청 응답이 오면(docs/requests/AI/006-registration-category-color-autofill.md) 이
 // 매핑을 그대로 쓰면 된다. 팔레트가 바뀌면(색이 추가/삭제되면) 이 상수도 함께 갱신해야 한다.

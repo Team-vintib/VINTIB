@@ -41,13 +41,12 @@ import sys
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _AI_ROOT = os.path.dirname(_SCRIPT_DIR)
-_REPO_ROOT = os.path.dirname(_AI_ROOT)
 # `app.*` — cwd가 AI/든 repo root든 상관없이 늘 잡히게 직접 넣는다.
 sys.path.insert(0, _AI_ROOT)
 # `sam3.*` — quality_check_worker_example.py와 같은 이유로 부모 디렉터리(worker/models/)를
 # 넣는다(여러 워커 패키지가 flat하게 sys.path에 들어가면 sys.modules 캐시가 충돌한다 —
 # AI/test/conftest.py 참고).
-sys.path.insert(0, os.path.join(_REPO_ROOT, "worker", "models"))
+sys.path.insert(0, os.path.join(_AI_ROOT, "worker", "models"))
 
 import httpx  # noqa: E402
 

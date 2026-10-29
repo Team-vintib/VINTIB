@@ -5,7 +5,7 @@ import java.util.Map;
 /**
  * AI 분류 소분류 코드(예: "CARDIGAN") -> BE categoryId(depth2/depth3) 정적 조회표.
  * `docs/requests/BE/045-classify-pre-upload-integration.md`에 실린 표(AI
- * {@code worker/models/product_classifier/taxonomy.py::CATEGORY_ID_MAP}을 BE 시드 기준으로
+ * {@code AI/worker/models/product_classifier/taxonomy.py::CATEGORY_ID_MAP}을 BE 시드 기준으로
  * 옮긴 것)를 그대로 하드코딩한다 — {@code ProductImageService.GARMENT_CATEGORY_BY_LEAF_NAME}과
  * 같은 관례(DB 조회 없는 정적 Map).
  *

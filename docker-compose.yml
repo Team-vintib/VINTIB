@@ -113,7 +113,7 @@ services:
   #    MinIO·MongoDB·대시보드를 함께 띄우는데, 우리는 Caddy(443)·Redis·MinIO 를 이미 쓰고
   #    있어 443 포트가 정면 충돌하고 메모리 예산(15GB)도 넘긴다.
   #    OpenVidu v3 는 LiveKit 기반이라 미디어 코어만 올려도 클라이언트(livekit-client)·
-  #    서버 SDK·room 개념이 전부 동일하다. 자세한 판단은 BE/docs/infra/ec2.md 참고.
+  #    서버 SDK·room 개념이 전부 동일하다. 자세한 판단은 infra/docs/ec2.md 참고.
   livekit:
     image: livekit/livekit-server:v1.9.1
     container_name: vintib-livekit

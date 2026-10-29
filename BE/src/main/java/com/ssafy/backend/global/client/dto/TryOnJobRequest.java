@@ -5,7 +5,7 @@ import java.util.Map;
 
 /**
  * {@code POST /ai/tryon} job payload. 필드명은 AI 쪽 계약(`docs/requests/BE/
- * 040-tryon-job-contract.md`, {@code worker/tryon_worker_example.py}의
+ * 040-tryon-job-contract.md`, {@code AI/worker/tryon_worker_example.py}의
  * {@code run_inference()} 독스트링)을 그대로 따른다 — snake_case로 직렬화해야 한다.
  */
 public record TryOnJobRequest(

@@ -79,7 +79,7 @@ volumes = [
 >
 > 변수를 **Protected** 로 설정하려면 `develop-BE` 도 protected 브랜치여야 한다. 아니면 배포 잡에서 값이 비어 배포가 실패한다.
 
-## 배포 동작 ([`infra/ci/deploy.sh`](../../../infra/ci/deploy.sh))
+## 배포 동작 ([`infra/ci/deploy.sh`](../ci/deploy.sh))
 
 1. **직전 태그 기록** — 현재 `.env` 의 `IMAGE_TAG` 를 롤백용으로 보관
 2. **코드 동기화** — 체크아웃 → `/home/ubuntu/vintib` (`.env`·`_disabled/` 제외)
