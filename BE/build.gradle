@@ -20,6 +20,8 @@ repositories {
 
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	// /actuator/prometheus — 서버 안의 Prometheus 가 Hikari·JVM·HTTP 지표를 긁는다. 외부 공개는 Caddy 가 막는다.
+	runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 	// springdoc v3.x 부터 Spring Boot 4(Spring Framework 7)를 지원한다. v2.x는 Boot 3.x 전용.
 	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.3'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'

@@ -33,7 +33,8 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus 는 서버 안(vintib-net)에서 backend:8080 으로만 긁는다. 외부 요청은 Caddy 가 404 로 막는다.
+        include: health,prometheus
   endpoint:
     health:
       # 컨테이너 healthcheck 용도로만 노출. 내부 구성 정보는 숨긴다.

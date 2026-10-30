@@ -14,7 +14,18 @@ services:
     image: postgres:18-alpine
     container_name: vintib-postgres
     restart: unless-stopped
-    command: ["postgres", "-c", "shared_buffers=1GB"]
+    # pg_stat_statements: 쿼리별 호출 수·누적 시간 집계. 처음 한 번 DB 에서 CREATE EXTENSION 이 더 필요하다.
+    # log_min_duration_statement: 200ms 넘게 걸린 쿼리를 로그로 남긴다.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - log_min_duration_statement=200
     environment:
       POSTGRES_DB: ${DB_NAME:-vintib}
       POSTGRES_USER: ${DB_USERNAME:-postgres}
