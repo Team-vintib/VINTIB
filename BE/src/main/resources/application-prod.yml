@@ -39,3 +39,17 @@ management:
     health:
       # 컨테이너 healthcheck 용도로만 노출. 내부 구성 정보는 숨긴다.
       show-details: never
+  metrics:
+    distribution:
+      # 기본값은 횟수·합계·최댓값만 내보내 서버 쪽 p95·p99를 계산할 수 없다.
+      # 히스토그램 구간(_bucket)을 내보내 Prometheus에서 histogram_quantile로 구한다.
+      percentiles-histogram:
+        "[http.server.requests]": true
+        "[hikaricp.connections.acquire]": true
+        "[jvm.gc.pause]": true
+
+server:
+  tomcat:
+    # Tomcat 스레드 지표(tomcat.threads.busy 등)는 MBean 레지스트리가 켜져야 나온다. Spring Boot 기본값은 꺼짐.
+    mbeanregistry:
+      enabled: true
