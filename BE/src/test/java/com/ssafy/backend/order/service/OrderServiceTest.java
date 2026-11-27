@@ -198,7 +198,7 @@ class OrderServiceTest {
         when(seller.getId()).thenReturn(SELLER_ID);
         when(buyer.getId()).thenReturn(BUYER_ID);
         Product realProduct = realDirectSaleProduct();
-        when(productRepository.findById(PRODUCT_ID)).thenReturn(Optional.of(realProduct));
+        when(productRepository.findByIdForUpdate(PRODUCT_ID)).thenReturn(Optional.of(realProduct));
         when(memberRepository.findById(BUYER_ID)).thenReturn(Optional.of(buyer));
         when(orderRepository.save(any(Order.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -216,7 +216,7 @@ class OrderServiceTest {
     void 본인_상품은_구매할_수_없다() {
         when(seller.getId()).thenReturn(BUYER_ID);
         Product realProduct = realDirectSaleProduct();
-        when(productRepository.findById(PRODUCT_ID)).thenReturn(Optional.of(realProduct));
+        when(productRepository.findByIdForUpdate(PRODUCT_ID)).thenReturn(Optional.of(realProduct));
 
         assertThatThrownBy(() -> orderService.createOrder(BUYER_ID, new OrderCreateRequest(PRODUCT_ID, null)))
                 .isInstanceOf(CustomException.class)

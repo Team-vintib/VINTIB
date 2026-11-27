@@ -120,7 +120,7 @@ class PointServiceTest {
     @Test
     void 충전하면_available이_증가하고_원장에_기록된다() {
         PointAccount account = newAccount();
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(account));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(account));
 
         PointBalanceResponse response = pointService.charge(MEMBER_ID, 100_000L, null);
 
@@ -135,7 +135,7 @@ class PointServiceTest {
                 .thenReturn(Optional.of(mock(WithdrawalAccount.class)));
         PointAccount account = newAccount();
         account.charge(100_000L);
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(account));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(account));
 
         PointBalanceResponse response = pointService.requestWithdrawal(MEMBER_ID, 30_000L);
         assertThat(response.available()).isEqualTo(70_000L);
@@ -150,7 +150,7 @@ class PointServiceTest {
                 .thenReturn(Optional.of(mock(WithdrawalAccount.class)));
         PointAccount account = newAccount();
         account.charge(10_000L);
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(account));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(account));
 
         assertThatThrownBy(() -> pointService.requestWithdrawal(MEMBER_ID, 30_000L))
                 .isInstanceOf(CustomException.class)
@@ -195,7 +195,7 @@ class PointServiceTest {
     void 결제하면_available이_줄고_tradeEscrow로_보관된다() {
         PointAccount account = newAccount();
         account.charge(100_000L);
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(account));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(account));
 
         pointService.pay(MEMBER_ID, 60_000L, 10L);
 
@@ -207,7 +207,7 @@ class PointServiceTest {
     void 결제시_잔액이_부족하면_예외를_던진다() {
         PointAccount account = newAccount();
         account.charge(10_000L);
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(account));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(account));
 
         assertThatThrownBy(() -> pointService.pay(MEMBER_ID, 60_000L, 10L))
                 .isInstanceOf(CustomException.class)
@@ -222,10 +222,10 @@ class PointServiceTest {
         PointAccount buyerAccount = newAccount();
         buyerAccount.charge(100_000L);
         buyerAccount.pay(60_000L);
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(buyerAccount));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(buyerAccount));
 
         PointAccount sellerAccount = PointAccount.builder().member(seller).build();
-        when(pointAccountRepository.findById(sellerId)).thenReturn(Optional.of(sellerAccount));
+        when(pointAccountRepository.findWithLockByMemberId(sellerId)).thenReturn(Optional.of(sellerAccount));
 
         pointService.settleOrder(MEMBER_ID, sellerId, 60_000L, 10L);
 
@@ -238,7 +238,7 @@ class PointServiceTest {
         PointAccount buyerAccount = newAccount();
         buyerAccount.charge(100_000L);
         buyerAccount.pay(60_000L);
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(buyerAccount));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(buyerAccount));
 
         pointService.refundOrder(MEMBER_ID, 60_000L, 10L);
 
@@ -284,10 +284,10 @@ class PointServiceTest {
     void 승인하면_포인트가_적립되고_충전상태가_DONE이_된다() {
         when(member.getId()).thenReturn(MEMBER_ID);
         PointCharge charge = PointCharge.builder().member(member).orderId("order-1").amount(100_000L).build();
-        when(pointChargeRepository.findByOrderId("order-1")).thenReturn(Optional.of(charge));
+        when(pointChargeRepository.findByOrderIdForUpdate("order-1")).thenReturn(Optional.of(charge));
 
         PointAccount account = newAccount();
-        when(pointAccountRepository.findById(MEMBER_ID)).thenReturn(Optional.of(account));
+        when(pointAccountRepository.findWithLockByMemberId(MEMBER_ID)).thenReturn(Optional.of(account));
 
         TossPaymentConfirmResponse confirmed =
                 new TossPaymentConfirmResponse("pk-1", "order-1", "DONE", 100_000L, OffsetDateTime.now());
@@ -304,7 +304,7 @@ class PointServiceTest {
         when(member.getId()).thenReturn(MEMBER_ID);
         PointCharge charge = PointCharge.builder().member(member).orderId("order-1").amount(100_000L).build();
         charge.markDone("pk-1", LocalDateTime.now());
-        when(pointChargeRepository.findByOrderId("order-1")).thenReturn(Optional.of(charge));
+        when(pointChargeRepository.findByOrderIdForUpdate("order-1")).thenReturn(Optional.of(charge));
 
         PointAccount account = newAccount();
         account.charge(100_000L);
@@ -320,7 +320,7 @@ class PointServiceTest {
     void 준비_금액과_다르면_승인을_거부한다() {
         when(member.getId()).thenReturn(MEMBER_ID);
         PointCharge charge = PointCharge.builder().member(member).orderId("order-1").amount(100_000L).build();
-        when(pointChargeRepository.findByOrderId("order-1")).thenReturn(Optional.of(charge));
+        when(pointChargeRepository.findByOrderIdForUpdate("order-1")).thenReturn(Optional.of(charge));
 
         assertThatThrownBy(() -> pointService.confirmCharge(MEMBER_ID, "order-1", "pk-1", 50_000L))
                 .isInstanceOf(CustomException.class)
@@ -332,7 +332,7 @@ class PointServiceTest {
     void 토스_승인이_실패하면_충전상태가_FAILED로_바뀌고_예외가_전파된다() {
         when(member.getId()).thenReturn(MEMBER_ID);
         PointCharge charge = PointCharge.builder().member(member).orderId("order-1").amount(100_000L).build();
-        when(pointChargeRepository.findByOrderId("order-1")).thenReturn(Optional.of(charge));
+        when(pointChargeRepository.findByOrderIdForUpdate("order-1")).thenReturn(Optional.of(charge));
         when(tossPaymentsClient.confirm("pk-1", "order-1", 100_000L))
                 .thenThrow(new CustomException(ErrorCode.PAYMENT_CONFIRM_FAILED));
 

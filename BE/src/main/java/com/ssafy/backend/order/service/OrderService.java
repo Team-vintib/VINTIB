@@ -87,10 +87,11 @@ public class OrderService {
     /**
      * 정찰제 즉시구매. 결제(포인트 보관), 주문 생성, 상품 SOLD 처리를 한 트랜잭션으로 묶는다.
      * 결제는 {@link PointService#pay}가 처리하며 잔액 부족이면 여기서 예외가 전파돼 전체가 롤백된다.
+     * 상품 행을 잠그고 읽어서, 동시에 들어온 구매는 앞 구매가 끝난 뒤 판매 완료 상태를 보고 거절된다.
      */
     @Transactional
     public OrderListItemResponse createOrder(Long buyerId, OrderCreateRequest request) {
-        Product product = productRepository.findById(request.productId())
+        Product product = productRepository.findByIdForUpdate(request.productId())
                 .orElseThrow(() -> new CustomException(ErrorCode.PRODUCT_NOT_FOUND));
         if (!product.isAvailableForDirectPurchase()) {
             throw new CustomException(ErrorCode.PRODUCT_NOT_AVAILABLE_FOR_PURCHASE);
