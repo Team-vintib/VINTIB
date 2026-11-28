@@ -76,7 +76,7 @@ public class PointService {
 
     @Transactional
     public PointBalanceResponse charge(Long memberId, Long amount, Long chargeRefId) {
-        PointAccount account = getOrCreateAccount(memberId);
+        PointAccount account = getOrCreateAccountForUpdate(memberId);
         account.charge(amount);
         PointTransaction transaction = pointTransactionRepository.save(PointTransaction.builder()
                 .member(account.getMember())
@@ -112,7 +112,7 @@ public class PointService {
     /** 충전 승인(POINT-001) — 토스 결제 승인 후 포인트를 적립한다. 중복 confirm 호출에도 안전(idempotent)하다. */
     @Transactional
     public PointBalanceResponse confirmCharge(Long memberId, String orderId, String paymentKey, Long amount) {
-        PointCharge charge = pointChargeRepository.findByOrderId(orderId)
+        PointCharge charge = pointChargeRepository.findByOrderIdForUpdate(orderId)
                 .orElseThrow(() -> new CustomException(ErrorCode.PAYMENT_CHARGE_NOT_FOUND));
         // 다른 회원 소유 orderId로 시도하는 경우 존재 자체를 드러내지 않는다(IDOR 방지).
         if (!charge.getMember().getId().equals(memberId)) {
@@ -145,7 +145,7 @@ public class PointService {
     /** 정찰제 즉시구매 결제(SALE-002) — available 부족 시 거부, 성공하면 tradeEscrow로 보관한다. */
     @Transactional
     public void pay(Long buyerId, Long amount, Long orderId) {
-        PointAccount account = getOrCreateAccount(buyerId);
+        PointAccount account = getOrCreateAccountForUpdate(buyerId);
         if (account.getAvailable() < amount) {
             throw new CustomException(ErrorCode.INSUFFICIENT_POINTS);
         }
@@ -167,8 +167,12 @@ public class PointService {
      */
     @Transactional
     public void settleOrder(Long buyerId, Long sellerId, Long amount, Long orderId) {
-        getOrCreateAccount(buyerId).releaseEscrow(amount);
-        PointAccount sellerAccount = getOrCreateAccount(sellerId);
+        // 두 계좌를 늘 같은 순서로 잠가, 서로 반대 방향의 정산이 겹쳐도 교착되지 않게 한다.
+        PointAccount first = getOrCreateAccountForUpdate(Math.min(buyerId, sellerId));
+        PointAccount second = getOrCreateAccountForUpdate(Math.max(buyerId, sellerId));
+        PointAccount buyerAccount = buyerId <= sellerId ? first : second;
+        PointAccount sellerAccount = buyerId <= sellerId ? second : first;
+        buyerAccount.releaseEscrow(amount);
         sellerAccount.settle(amount);
         pointTransactionRepository.save(PointTransaction.builder()
                 .member(sellerAccount.getMember())
@@ -186,7 +190,7 @@ public class PointService {
      */
     @Transactional
     public void refundOrder(Long buyerId, Long amount, Long orderId) {
-        PointAccount account = getOrCreateAccount(buyerId);
+        PointAccount account = getOrCreateAccountForUpdate(buyerId);
         account.refund(amount);
         PointTransaction transaction = pointTransactionRepository.save(PointTransaction.builder()
                 .member(account.getMember())
@@ -211,7 +215,7 @@ public class PointService {
             throw new CustomException(ErrorCode.WITHDRAWAL_ACCOUNT_REQUIRED);
         }
 
-        PointAccount account = getOrCreateAccount(memberId);
+        PointAccount account = getOrCreateAccountForUpdate(memberId);
         if (account.getAvailable() < amount) {
             throw new CustomException(ErrorCode.INSUFFICIENT_POINTS);
         }
@@ -262,6 +266,15 @@ public class PointService {
     // 여러 개여도 놓칠 위험이 없다.
     private PointAccount getOrCreateAccount(Long memberId) {
         return pointAccountRepository.findById(memberId)
+                .orElseGet(() -> pointAccountRepository.save(PointAccount.builder()
+                        .member(memberRepository.findById(memberId)
+                                .orElseThrow(() -> new CustomException(ErrorCode.USER_NOT_FOUND)))
+                        .build()));
+    }
+
+    // 잔액을 바꾸는 경로용. 행을 잠그고 읽어 "잔액 확인 → 변경"이 동시 요청 사이에서 끼어들지 않게 한다.
+    private PointAccount getOrCreateAccountForUpdate(Long memberId) {
+        return pointAccountRepository.findWithLockByMemberId(memberId)
                 .orElseGet(() -> pointAccountRepository.save(PointAccount.builder()
                         .member(memberRepository.findById(memberId)
                                 .orElseThrow(() -> new CustomException(ErrorCode.USER_NOT_FOUND)))
